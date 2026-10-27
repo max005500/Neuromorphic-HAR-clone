@@ -1,0 +1,71 @@
+# Datasets descargados y caches; conservar documentacion y etiquetas manuales.
+/data/*
+!/data/README.md
+!/data/.gitkeep
+!/data/labels_transitions/
+
+# KFall: versionar el README y excluir los datos descargados.
+!/data/KFall/
+/data/KFall/*
+!/data/KFall/README.md
+
+!/data/SisFall_dataset/
+/data/SisFall_dataset/*
+!/data/SisFall_dataset/README.md
+
+!/data/UCI HAR Dataset/
+/data/UCI HAR Dataset/*
+!/data/UCI HAR Dataset/README.md
+
+# Entrenamiento, optimizacion y reportes generados.
+/runs/
+/results/
+*.log
+
+# Bytecode y caches de Python, notebooks y herramientas de desarrollo.
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.cache/
+
+# Entornos virtuales locales.
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.python-version
+
+# Archivos locales de entorno; permitir plantillas sin credenciales.
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+
+# Empaquetado y cobertura.
+build/
+dist/
+*.egg-info/
+.eggs/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Configuracion local de editores y archivos temporales del sistema.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*.tmp
+*~
