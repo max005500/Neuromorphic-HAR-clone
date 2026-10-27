@@ -62,6 +62,8 @@ class KFallTrainingTests(unittest.TestCase):
             self.assertEqual(checkpoint["epoch"], 1)
             self.assertEqual(checkpoint["config"]["n_classes"], 3)
             self.assertFalse(any(key.startswith("head2") for key in checkpoint["model_state_dict"]))
+            for chart in ("accuracy.png", "loss.png"):
+                self.assertEqual((run / "metrics" / chart).read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
             true = np.load(run / "metrics" / "y_true.npy")
             pred = np.load(run / "metrics" / "y_pred.npy")
             np.testing.assert_array_equal(np.unique(true), [0, 1, 2])

@@ -140,6 +140,7 @@ python optimize_theta.py --help
 python train_sisfall.py --help
 python train_kfall.py --help
 python train_ucihar.py --help
+python plot_training.py --help
 python energy_report.py --help
 ```
 
@@ -229,6 +230,21 @@ python train_sisfall.py --head-mode dual --tau 0.75 --thresh 0.5 \
 ```
 
 Each training run creates a separate folder under `runs/`.
+
+All training scripts save `metrics/accuracy.png` and `metrics/loss.png` at the
+end of training, including early stopping. Each plot compares training and
+validation across the recorded epochs. Dual-head runs include separate panels
+for supervised heads; the unannotated KFall posture head is omitted.
+
+Generate or refresh plots for existing runs without retraining:
+
+```bash
+# All runs with a saved metrics/history.json.
+python plot_training.py
+
+# A specific run (a metrics directory or history.json path is also accepted).
+python plot_training.py runs/kfall_scn_YYYYMMDD_HHMMSS
+```
 
 KFall runs save the best validation checkpoint, history, test predictions, a classification report, confusion matrices, and dataset metadata. Cached events are read on demand during training to avoid converting the complete cache to floating-point tensors in RAM.
 

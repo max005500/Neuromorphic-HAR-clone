@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from preprocess.utils import json_ready, save_json
+from train.plotting import save_training_curves
 
 
 def set_seed(seed: int) -> None:
@@ -200,7 +201,7 @@ def fit_model(
     format_epoch_fn: Callable[[int, int, dict[str, Any], dict[str, Any], float, float, float, bool], str] | None = None,
     checkpoint_extra_fn: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run train/validation epochs, checkpoint the best model, and save history."""
+    """Train, checkpoint the best model, and save history and learning curves."""
     metrics_dir = Path(metrics_dir)
     ckpt_path = Path(ckpt_path)
     metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -266,11 +267,16 @@ def fit_model(
             print(f"[early-stop] epoch={epoch} best_val_loss={best_val:.6f}", flush=True)
             break
 
+    plot_paths = save_training_curves(history, metrics_dir)
+    for name, path in plot_paths.items():
+        print(f"[plots] {name}={path}", flush=True)
+
     return {
         "history": history,
         "best_val": float(best_val),
         "best_epoch": int(best_epoch),
         "started_at": float(started_at),
+        "plot_paths": plot_paths,
     }
 
 
