@@ -141,6 +141,8 @@ python train_sisfall.py --help
 python train_kfall.py --help
 python train_ucihar.py --help
 python plot_training.py --help
+python view_kfall.py --help
+python evaluate_kfall.py --help
 python energy_report.py --help
 ```
 
@@ -247,6 +249,102 @@ python plot_training.py runs/kfall_scn_YYYYMMDD_HHMMSS
 ```
 
 KFall runs save the best validation checkpoint, history, test predictions, a classification report, confusion matrices, and dataset metadata. Cached events are read on demand during training to avoid converting the complete cache to floating-point tensors in RAM.
+
+## Evaluate the best KFall checkpoint
+
+Evaluate an existing run without training again:
+
+```bash
+python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
+
+# Force CPU inference if desired.
+python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS --device cpu
+```
+
+The evaluator loads `checkpoints/best_model.pt`, selected by the lowest
+validation loss, and reconstructs the network from the configuration embedded
+in that checkpoint. It checks the event cache against the run's
+`dataset_metadata.json`, including encoding parameters, source signature, and
+subject/window manifests. It reads only the original test arrays and performs
+inference with gradients disabled. The original CSV/XLSX files are not needed
+when the matching cache is available. Missing or incompatible caches produce
+an error and are not rebuilt during evaluation.
+
+Results are saved under the run's `metrics/test_best/`:
+
+- `metrics.json`: accuracy, loss, balanced accuracy, macro/weighted F1, per-class
+  and per-subject metrics, and window-level fall precision/recall/specificity.
+- `confusion_matrix.png`: counts and normalization by the true class.
+- `classification_report.txt` and `.json`: class precision, recall, F1, support.
+- `predictions.csv`: original test-window index, subject, recording, true and
+  predicted classes, all three softmax probabilities, and annotated time
+  remaining before impact.
+- NPY files with targets, predictions, probabilities, window indices, and
+  confusion matrices.
+
+Restrict inspection to a held-out subject or a specific test-window index:
+
+```bash
+python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS --subject SA07
+python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS --window 580
+```
+
+Subset reports go into separate directories under `metrics/test_best/subsets/`.
+The window index matches the test cache and `view_kfall.py --split test --window
+580`. Optional `--checkpoint`, `--cache-dir`, and `--output-dir` arguments select
+other locations; the checkpoint/cache must still match the run's saved dataset
+configuration and partition.
+
+Class weights come from the checkpoint's training weights. By default, the
+saved training batch size and loss aggregation are reused to match the training
+script's test loss. Changing `--batch-size` can change weighted loss averaging.
+KFall's optional dual architecture is evaluated through its activity head.
+These reports measure offline window classification; `lead_time_ms` describes
+the annotation at a window endpoint and is not an achieved continuous warning
+time.
+
+## Interactive KFall window viewer
+
+Inspect the same encoded windows used by training alongside their original CSV
+signals:
+
+```bash
+python view_kfall.py
+
+# Start with pre-impact fall windows and the gyroscope's X/Y/Z axes.
+python view_kfall.py --split test --class fall --sensor gyro
+```
+
+The viewer shows three signal/event pairs. Switch between acceleration (g) and
+angular velocity (degrees/s), filter by split, class, and subject, and navigate
+using the slider, the actual cache index, or the Previous/Next buttons. Arrow
+keys move between windows; Home/End select the first/last matching window, and
+`s` saves a PNG under `results/kfall_viewer/`. Enter `Todos` to clear the subject
+filter. Selecting another partition clears a subject filter that does not
+belong to it.
+
+The left column overlays the original measurements, the interpolated signal,
+and an optional reconstruction from cached Sigma-Delta events. The right column
+shows the actual cached ON/OFF events for each axis, displayed at +1 and -1;
+the model receives their two binary polarity channels. This is signal encoding.
+The onset annotation is marked when visible; the header/footer identify the
+subject, source recording, window, offsets, thresholds, and annotated time
+remaining before impact. The time axis covers only the observed window.
+
+The viewer reads the cache without changing or rebuilding it. It verifies each
+displayed window against its CSV, and reports mismatches instead of silently
+showing different data. If needed, create the cache first with
+`python train_kfall.py --preprocess-only`. Use `--cache-dir` for a different event
+cache directory (the directory containing `metadata.json`), and `--dataset-root`
+if the source dataset has moved.
+
+A graphical Matplotlib backend such as TkAgg is required for the interactive
+window. Export a selected window without a graphical session with:
+
+```bash
+python view_kfall.py --class fall --sensor acc \
+  --save results/kfall_viewer/fall_acc.png
+```
 
 ## Energy reports
 

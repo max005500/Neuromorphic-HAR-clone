@@ -35,6 +35,12 @@ python train_kfall.py --preprocess-only --workers 0
 
 # Train using the prepared event windows.
 python train_kfall.py --epochs 100 --batch-size 128 --workers 4
+
+# Compare original X/Y/Z signals with the cached Sigma-Delta events.
+python view_kfall.py --class fall
+
+# Evaluate an existing run's best checkpoint on its held-out test subjects.
+python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
 ```
 
 Subjects are assigned to disjoint partitions before windowing. The default fall
