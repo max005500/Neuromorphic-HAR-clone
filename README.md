@@ -143,6 +143,7 @@ python train_ucihar.py --help
 python plot_training.py --help
 python view_kfall.py --help
 python evaluate_kfall.py --help
+python animate_kfall.py --help
 python energy_report.py --help
 ```
 
@@ -302,6 +303,58 @@ KFall's optional dual architecture is evaluated through its activity head.
 These reports measure offline window classification; `lead_time_ms` describes
 the annotation at a window endpoint and is not an achieved continuous warning
 time.
+
+## Moving signal and prediction replay
+
+Replay one complete recording from the original held-out test subjects using
+the run's best checkpoint:
+
+```bash
+python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
+
+# Select a specific test recording or the recording of a cached test window.
+python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS \
+  --recording S07T20R01.csv
+python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS --window 580
+```
+
+The Matplotlib player scrolls the three accelerometer or gyroscope axes, plots
+`P(Fall)`, and compares two timelines: the model's decision and the real fall
+phase. Play/pause, restart, seek, previous/next decision, sensor selection, and
+playback speed are available. Space toggles playback; arrow keys move between
+decisions. `--view-seconds` changes the visible time span and `--paused` starts
+the player paused.
+
+Inference uses trailing windows with the checkpoint's original encoder settings.
+The default prediction stride is ten raw samples (100 ms at 100 Hz), adjustable
+with `--prediction-stride`. Every window is classified on this fixed grid,
+including motion before fall onset and after impact; annotations do not choose
+prediction times or enter the model. A decision appears at its window endpoint
+and is held until the next one. Before a complete input window is available,
+the model is shown as having no prediction. The displayed samples and decisions
+never extend beyond the playback cursor.
+
+Ground truth distinguishes the annotated onset-to-impact falling interval from
+the post-impact period. Post-impact is shown separately because the normal
+activity class there is not temporally annotated. The model's binary fall
+indicator uses the argmax of its three output classes, and the probability panel
+shows its softmax `P(Fall)`.
+
+Predictions are computed before playback for this visualization. Playback speed
+does not measure inference latency, and this demonstration is separate from
+the annotation-selected window metrics produced by `evaluate_kfall.py`.
+
+Export without a graphical session:
+
+```bash
+python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS \
+  --device cpu --fps 10 --save-gif results/kfall_replay/fall.gif
+python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS \
+  --time 2.5 --save-frame results/kfall_replay/fall_2p5s.png
+```
+
+Use `--subject`, `--sensor gyro`, `--device`, `--checkpoint`, `--cache-dir`, or
+`--dataset-root` to select other held-out recordings or local file locations.
 
 ## Interactive KFall window viewer
 

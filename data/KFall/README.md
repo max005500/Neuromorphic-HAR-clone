@@ -41,6 +41,9 @@ python view_kfall.py --class fall
 
 # Evaluate an existing run's best checkpoint on its held-out test subjects.
 python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
+
+# Animate a full test recording with predicted and real fall labels.
+python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
 ```
 
 Subjects are assigned to disjoint partitions before windowing. The default fall
