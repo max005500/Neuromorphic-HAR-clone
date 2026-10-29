@@ -68,6 +68,11 @@ remain at 100 Hz. It does not create independent measurements or new recordings.
 The event encoder retains its separate temporal grid. Threshold searches save
 `best_theta.json`, which can be supplied to training with `--theta-file` while
 keeping the same window, subject split, interpolation, and encoder settings.
+The portable preset [`configs/kfall_theta_200hz.json`](../../configs/kfall_theta_200hz.json)
+is included with the source code. Files under `results/`, including generated
+`best_theta.json` reports, are ignored by Git. From the repository root, use
+`--theta-file configs/kfall_theta_200hz.json --resample-hz 200`; select the window
+duration and endpoint context explicitly as described in the project README.
 
 Only this README is versioned from `data/KFall/`; downloaded sensor files and
 label workbooks are ignored by Git. See the [project README](../../README.md#kfall)

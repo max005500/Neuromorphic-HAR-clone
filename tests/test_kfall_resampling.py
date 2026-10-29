@@ -95,6 +95,30 @@ class AnalogResamplingTests(unittest.TestCase):
 
 
 class ThresholdSearchTrainingTests(unittest.TestCase):
+    def test_bundled_theta_preset_loads_without_generated_results(self):
+        root = Path(__file__).resolve().parents[1]
+        path = root / "configs" / "kfall_theta_200hz.json"
+        expected = [.025, .025, .025, 1.25, 1.25, 1.25]
+        self.assertEqual(read_theta_file(path), expected)
+        cfg = get_args(["--theta-file", str(path), "--resample-hz", "200",
+                        "--endpoint-context", "410"])
+        direct = get_args(["--theta", *map(str, expected), "--resample-hz", "200",
+                           "--endpoint-context", "410"])
+        self.assertEqual(cfg.theta, expected)
+        self.assertEqual(cfg.cache_name, direct.cache_name)
+
+    def test_missing_theta_file_explains_portable_alternative_without_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "results" / "best_theta.json"
+            with self.assertRaisesRegex(ValueError, "configs/kfall_theta_200hz.json") as context:
+                read_theta_file(missing)
+            self.assertIn(str(missing), str(context.exception))
+            self.assertIn(str(Path.cwd()), str(context.exception))
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit):
+                get_args(["--theta-file", str(missing)])
+            self.assertIn("Threshold file not found", errors.getvalue())
+
     def test_theta_file_rejects_other_datasets_and_accepts_kfall_or_unspecified(self):
         thresholds = [.05, .08, .09, 5., 7., 9.]
         with tempfile.TemporaryDirectory() as temporary:

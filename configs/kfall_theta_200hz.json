@@ -1,0 +1,21 @@
+{
+  "dataset": "kfall",
+  "theta_best": [0.025, 0.025, 0.025, 1.25, 1.25, 1.25],
+  "channels": ["AccX", "AccY", "AccZ", "GyrX", "GyrY", "GyrZ"],
+  "units": ["g", "g", "g", "degrees/s", "degrees/s", "degrees/s"],
+  "calibration": {
+    "selected_by": "validation_macro_f1",
+    "window_seconds": 2.05,
+    "native_sample_rate_hz": 100,
+    "resample_hz": 200,
+    "endpoint_context": 410,
+    "post_impact_seconds": 1.2,
+    "dead_zone": 0.5,
+    "seed": 0,
+    "split": [0.8, 0.1, 0.1],
+    "epochs": 3,
+    "batch_size": 32,
+    "train_per_class": 0
+  },
+  "note": "Best tested exploratory thresholds for the 2.05-second window under this calibration budget, not a global optimum. The theta-file option loads only the six thresholds; specify the other preprocessing settings explicitly."
+}

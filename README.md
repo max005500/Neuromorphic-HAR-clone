@@ -240,6 +240,28 @@ Search outputs include candidate metrics, a comparison plot, and
 `train_kfall.py --theta-file PATH/TO/best_theta.json --resample-hz 200`, preserving
 the search window duration, endpoint context, split, and encoding settings.
 
+The repository includes an exploratory calibration preset at
+[`configs/kfall_theta_200hz.json`](configs/kfall_theta_200hz.json):
+`0.025 0.025 0.025 1.25 1.25 1.25` (g for acceleration, degrees/s for rotation).
+Generated files under `results/` are ignored by Git and are not available in a
+fresh checkout. The preset contains the six selected thresholds and their
+calibration conditions; `--theta-file` loads only the thresholds, so keep the
+other settings explicit. Run from the repository root:
+
+```bash
+python compare_kfall_windows.py --mode preprocess \
+  --durations 2.05 3.30 4.10 --resample-hz 200 \
+  --theta-file configs/kfall_theta_200hz.json \
+  --post-impact-seconds 1.20 --endpoint-policy matched --workers 0 \
+  --results-dir results/kfall_window_comparison_200hz_calibrated
+```
+
+Use `--mode train --epochs 3 --batch-size 32 --device cpu` with the same settings
+to train the three variants. The preset was calibrated on 2.05-second windows;
+applying the same thresholds to all durations keeps that variable fixed for
+the window comparison. Supply the values directly with
+`--theta 0.025 0.025 0.025 1.25 1.25 1.25` if a JSON file is inconvenient.
+
 Refine around a previous winner, or start from an `optimize_theta.py` result,
 using `--theta-file` instead of six explicit `--theta` values. For example:
 

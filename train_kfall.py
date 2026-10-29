@@ -43,7 +43,16 @@ CLASS_NAMES = class_names(3)
 
 def read_theta_file(path: str | Path) -> list[float]:
     """Read an optimizer/search result without silently replacing invalid values."""
-    document = json.loads(Path(path).read_text())
+    source = Path(path)
+    try:
+        document = json.loads(source.read_text())
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"Threshold file not found: {source}. Current directory: {Path.cwd()}. "
+            "Generated results/ files are not included in Git. From the repository root, "
+            "use --theta-file configs/kfall_theta_200hz.json for the bundled calibration, "
+            "or provide six values with --theta."
+        ) from exc
     if not isinstance(document, dict):
         raise ValueError("theta-file must contain a JSON object with theta_best or best_theta.")
     if document.get("dataset", "kfall") != "kfall":
