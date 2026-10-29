@@ -43,6 +43,7 @@ def write_fixture(root: Path) -> None:
 def fixture_args(root: Path) -> list[str]:
     return [
         "--dataset-root", str(root), "--cache-dir", str(root / "cache"),
+        "--post-impact-seconds", "0", "--cache-name", "default",
         "--out-dir", str(root / "runs"), "--split", "1", "1", "1",
         "--epochs", "1", "--batch-size", "3", "--workers", "0",
         "--out-win", "128", "--conv-ch", "4", "4", "4",

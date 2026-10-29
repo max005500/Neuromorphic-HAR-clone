@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from preprocess.utils import json_ready
+from preprocess.kfall_labels import class_names
 
 CLASS_NAMES = ("Fall", "Dynamic", "Static")
 
@@ -54,7 +55,7 @@ def _fall_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
     }
 
 
-def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray) -> None:
+def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, names: tuple[str, ...]) -> None:
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -67,10 +68,10 @@ def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray) -> N
         ):
             maximum = 1.0 if is_normalized else max(1, int(counts.max()))
             rendered = axis.imshow(values, cmap="Blues", vmin=0, vmax=maximum)
-            axis.set(xticks=range(3), yticks=range(3), xticklabels=CLASS_NAMES,
-                     yticklabels=CLASS_NAMES, xlabel="Predicción", ylabel="Clase real", title=title)
-            for row in range(3):
-                for column in range(3):
+            axis.set(xticks=range(len(names)), yticks=range(len(names)), xticklabels=names,
+                     yticklabels=names, xlabel="Predicción", ylabel="Clase real", title=title)
+            for row in range(len(names)):
+                for column in range(len(names)):
                     value = values[row, column]
                     label = ("—" if counts[row].sum() == 0 else f"{value:.1%}") if is_normalized else str(int(value))
                     axis.text(column, row, label, ha="center", va="center",
@@ -98,16 +99,22 @@ def save_evaluation_reports(
     truth = np.asarray(y_true)
     indices = np.asarray(window_indices)
     probabilities = np.asarray(probabilities, dtype=np.float64)
-    if truth.ndim != 1 or truth.dtype.kind not in "iu" or not np.isin(truth, range(3)).all():
-        raise ValueError("y_true must be a one-dimensional integer array of KFall class IDs 0..2.")
+    if probabilities.ndim != 2 or probabilities.shape[1] not in (3, 4):
+        raise ValueError("probabilities must have shape (N, 3) or (N, 4).")
+    n_classes = summary.get("n_classes", metadata.get("n_classes", probabilities.shape[1]))
+    if n_classes not in (3, 4) or probabilities.shape[1] != n_classes:
+        raise ValueError("The probability class count must match the checkpoint and dataset class scheme.")
+    names = tuple(class_names(n_classes).values())
+    if truth.ndim != 1 or truth.dtype.kind not in "iu" or not np.isin(truth, range(n_classes)).all():
+        raise ValueError(f"y_true must be a one-dimensional integer array of KFall class IDs 0..{n_classes - 1}.")
     if not len(truth):
         raise ValueError("Cannot report an empty test selection.")
     if indices.ndim != 1 or indices.dtype.kind not in "iu" or len(indices) != len(truth):
         raise ValueError("window_indices must contain one integer cache index per prediction.")
     if len(np.unique(indices)) != len(indices):
         raise ValueError("window_indices must not repeat the same cached window.")
-    if probabilities.shape != (len(truth), 3) or not np.isfinite(probabilities).all():
-        raise ValueError("probabilities must have finite shape (N, 3).")
+    if probabilities.shape != (len(truth), n_classes) or not np.isfinite(probabilities).all():
+        raise ValueError(f"probabilities must have finite shape (N, {n_classes}).")
     if np.any(probabilities < 0) or np.any(probabilities > 1) or not np.allclose(probabilities.sum(axis=1), 1, rtol=0, atol=1e-4):
         raise ValueError("Each probability row must contain values in [0, 1] summing to one.")
     cached_labels = np.asarray(split["y_h1"])
@@ -132,47 +139,50 @@ def save_evaluation_reports(
         if record.get("subject", subject) != subject:
             raise ValueError(f"Test window {index} does not match its source subject.")
         lead_time = None
-        if truth[position] == 0 and "lead_time_ms" in split:
+        if truth[position] in (0, 3) and "lead_time_ms" in split:
             lead_time = _strict_values(float(split["lead_time_ms"][index]))
         csv_rows.append({
             "window_index": index, "split": "test", "subject": subject,
             "file": str(record["file"]), "code": record["code"], "trial": record["trial"],
             "start": int(split["start"][index]), "end_frame": int(split["end_frame"][index]),
-            "true_class_id": int(truth[position]), "true_class": CLASS_NAMES[truth[position]],
-            "predicted_class_id": int(predicted[position]), "predicted_class": CLASS_NAMES[predicted[position]],
+            "true_class_id": int(truth[position]), "true_class": names[truth[position]],
+            "predicted_class_id": int(predicted[position]), "predicted_class": names[predicted[position]],
             "correct": int(truth[position] == predicted[position]),
             "confidence": float(probabilities[position, predicted[position]]),
             "prob_fall": float(probabilities[position, 0]),
             "prob_dynamic": float(probabilities[position, 1]),
             "prob_static": float(probabilities[position, 2]), "lead_time_ms": lead_time,
         })
+        if n_classes == 4:
+            csv_rows[-1]["prob_postimpact"] = float(probabilities[position, 3])
 
-    report_arguments = dict(labels=list(range(3)), target_names=list(CLASS_NAMES), zero_division=np.nan)
+    report_arguments = dict(labels=list(range(n_classes)), target_names=list(names), zero_division=np.nan)
     report = classification_report(truth, predicted, output_dict=True, **report_arguments)
-    counts = confusion_matrix(truth, predicted, labels=list(range(3)))
+    counts = confusion_matrix(truth, predicted, labels=list(range(n_classes)))
     support = counts.sum(axis=1)
     normalized = np.divide(counts, support[:, None], out=np.zeros_like(counts, dtype=float), where=support[:, None] != 0)
-    recall = np.divide(np.diag(counts), support, out=np.zeros(3, dtype=float), where=support != 0)
+    recall = np.divide(np.diag(counts), support, out=np.zeros(n_classes, dtype=float), where=support != 0)
     per_subject = {}
     for subject in sorted(np.unique(subjects).tolist()):
         selected = subjects == subject
         per_subject[str(subject)] = {
             "n": int(selected.sum()), "accuracy": float(np.mean(truth[selected] == predicted[selected])),
-            "class_counts": {name: int(np.sum(truth[selected] == label)) for label, name in enumerate(CLASS_NAMES)},
+            "class_counts": {name: int(np.sum(truth[selected] == label)) for label, name in enumerate(names)},
             "fall_window_metrics": _fall_metrics(truth[selected], predicted[selected]),
         }
     metrics = {
         **summary, "n": len(truth), "n_samples": len(truth),
+        "n_classes": n_classes, "class_names": list(names),
         "accuracy": float(np.mean(truth == predicted)),
         "balanced_accuracy": float(np.mean(recall[support > 0])),
         "macro_f1": report["macro avg"]["f1-score"],
         "weighted_f1": report["weighted avg"]["f1-score"],
-        "per_class": {name: report[name] for name in CLASS_NAMES},
-        "class_counts": {name: int(np.sum(truth == label)) for label, name in enumerate(CLASS_NAMES)},
-        "predicted_class_counts": {name: int(np.sum(predicted == label)) for label, name in enumerate(CLASS_NAMES)},
+        "per_class": {name: report[name] for name in names},
+        "class_counts": {name: int(np.sum(truth == label)) for label, name in enumerate(names)},
+        "predicted_class_counts": {name: int(np.sum(predicted == label)) for label, name in enumerate(names)},
         "fall_window_metrics": _fall_metrics(truth, predicted), "per_subject": per_subject,
         "evaluation_scope": "offline_test_window_classification",
-        "timing_note": "lead_time_ms is the annotated time remaining before impact at a window endpoint; it is not measured warning time from a continuous alerting system.",
+        "timing_note": "lead_time_ms is the signed annotated time to impact at a window endpoint (negative after impact); it is not measured warning time from a continuous alerting system.",
     }
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +200,7 @@ def save_evaluation_reports(
     _save_json(output_dir / "classification_report.json", report)
     (output_dir / "classification_report.txt").write_text(
         classification_report(truth, predicted, digits=4, **report_arguments), encoding="utf-8")
-    _confusion_plot(output_dir / "confusion_matrix.png", counts, normalized)
+    _confusion_plot(output_dir / "confusion_matrix.png", counts, normalized, names)
     metrics = _strict_values(metrics)
     _save_json(output_dir / "metrics.json", metrics)
     return metrics

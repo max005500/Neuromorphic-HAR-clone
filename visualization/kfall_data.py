@@ -11,12 +11,13 @@ from typing import Any
 
 import numpy as np
 
-from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events
+from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events, window_targets_for_record
+from preprocess.kfall_labels import class_names
 from preprocess.interpolate_signal import interpolate_to_times
+from preprocess.kfall_resampling import resample_kfall_signal
 from preprocess.preprocess_kfall import load_record
 
 
-CLASS_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static"}
 SPLIT_NAMES = ("train", "val", "test")
 ARRAY_KEYS = ("x_ev", "offset", "y_h1", "file_idx", "start", "subject", "end_frame", "lead_time_ms")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,10 @@ class WindowData:
     fall_onset_time: float | None
     fall_impact_time: float | None
     theta: np.ndarray
+    post_impact_end_time: float | None = None
+    resample_hz: float | None = None
+    analog: np.ndarray | None = None
+    time_analog: np.ndarray | None = None
 
 
 @lru_cache(maxsize=8)
@@ -82,6 +87,8 @@ class KFallWindowStore:
         self.config = dict(self.metadata.get("config", {}))
         allowed = {field.name for field in fields(KFallEventLoaderConfig)}
         self.cfg = KFallEventLoaderConfig(**{key: value for key, value in self.config.items() if key in allowed})
+        self.n_classes = 4 if getattr(self.cfg, "post_impact_seconds", 0.0) > 0 else 3
+        self.class_names = class_names(self.n_classes)
         self.records = self.metadata.get("recordings", [])
         if not isinstance(self.records, list) or not self.records:
             raise ValueError("KFall cache metadata has no source-recording manifest.")
@@ -121,8 +128,8 @@ class KFallWindowStore:
         arrays = self._load_split(split)
         mask = np.ones(len(arrays["y_h1"]), dtype=bool)
         if class_id is not None:
-            if class_id not in CLASS_NAMES:
-                raise ValueError("class_id must be 0 (Fall), 1 (Dynamic), or 2 (Static).")
+            if class_id not in self.class_names:
+                raise ValueError(f"class_id must belong to this cache's classes: {self.class_names}.")
             mask &= arrays["y_h1"] == class_id
         if subject is not None and str(subject).strip().lower() not in {"", "all", "todos"}:
             match = re.fullmatch(r"(?:SA|S)?(\d{1,2})", str(subject).strip().upper())
@@ -171,13 +178,17 @@ class KFallWindowStore:
         for key in ("subject", "code", "trial", "label_id"):
             if source[key] != record[key]:
                 raise ValueError(f"Source CSV {path.name} does not match cached recording metadata ({key}).")
-        if class_id not in CLASS_NAMES or class_id != record["label_id"] or subject != record["subject"]:
+        if class_id not in self.class_names or subject != record["subject"]:
             raise ValueError(f"Cached window {split}[{index}] has inconsistent subject or activity labels.")
         start = int(arrays["start"][index])
         stop = start + self.cfg.raw_win
         if start < 0 or stop > len(signal):
             raise ValueError(f"Cached window {split}[{index}] is outside source CSV {path.name}.")
         raw, frames = signal[start:stop], all_frames[start:stop]
+        starts, targets = window_targets_for_record(signal, {**record, "frames": all_frames}, self.cfg)
+        positions = np.flatnonzero(starts == start)
+        if len(positions) != 1 or int(targets[int(positions[0])]) != class_id:
+            raise ValueError(f"Cached window {split}[{index}] has an inconsistent temporal activity label.")
         events = np.asarray(arrays["x_ev"][index])
         offset = np.asarray(arrays["offset"][index])
         if not np.isin(events, (0, 1)).all():
@@ -195,7 +206,10 @@ class KFallWindowStore:
 
         time_raw = (frames - frames[0]).astype(np.float64) / self.cfg.sample_rate_hz
         time_events_grid = np.linspace(0.0, time_raw[-1], self.cfg.out_win, dtype=np.float32)
-        interpolated = interpolate_to_times(raw, time_raw, time_events_grid, method="linear")
+        analog, analog_times = resample_kfall_signal(
+            raw, frames, sample_rate_hz=self.cfg.sample_rate_hz, resample_hz=self.cfg.resample_hz,
+        )
+        interpolated = interpolate_to_times(analog, analog_times, time_events_grid, method="linear")
         theta = np.asarray(self.cfg.theta_sd, dtype=np.float32)
         state = offset.copy() if self.cfg.sd_init == "x0" else np.zeros(6, dtype=np.float32)
         signed = events[:, :, 0].astype(np.float32) - events[:, :, 1].astype(np.float32)
@@ -205,23 +219,26 @@ class KFallWindowStore:
             state = state + signed[step] * theta
             reconstructed[step] = state
 
-        onset_time = impact_time = lead_time = None
-        if class_id == 0:
+        onset_time = impact_time = lead_time = post_end_time = None
+        if int(record["label_id"]) == 0:
             onset, impact = int(record["fall_onset_frame"]), int(record["fall_impact_frame"])
-            if not onset <= int(frames[-1]) <= impact or (self.cfg.fall_policy == "pre_impact" and frames[-1] == impact):
-                raise ValueError(f"Cached fall window {split}[{index}] violates its temporal label policy.")
             onset_time = (onset - int(frames[0])) / self.cfg.sample_rate_hz
             impact_time = (impact - int(frames[0])) / self.cfg.sample_rate_hz
             lead_time = float(arrays["lead_time_ms"][index])
             expected_lead = (impact - int(frames[-1])) * 1000.0 / self.cfg.sample_rate_hz
             if not np.isfinite(lead_time) or not np.isclose(lead_time, expected_lead):
                 raise ValueError(f"Cached lead time does not match fall annotations for {split}[{index}].")
+            if getattr(self.cfg, "post_impact_seconds", 0.0) > 0:
+                end_frame = int(record.get("post_impact_end_frame", impact + round(
+                    self.cfg.post_impact_seconds * self.cfg.sample_rate_hz)))
+                post_end_time = (end_frame - int(frames[0])) / self.cfg.sample_rate_hz
 
         return WindowData(
             split=split, index=index, raw=raw, interpolated=interpolated, events=events,
             reconstructed=reconstructed, time_raw=time_raw, time_events=time_events_grid.astype(np.float64),
             frames=frames, offset=offset, subject=subject, code=record["code"], trial=record["trial"],
             path=path, start=start, stop=stop, end_frame=int(frames[-1]), lead_time_ms=lead_time,
-            class_id=class_id, label=CLASS_NAMES[class_id], fall_onset_time=onset_time,
-            fall_impact_time=impact_time, theta=theta,
+            class_id=class_id, label=self.class_names[class_id], fall_onset_time=onset_time,
+            fall_impact_time=impact_time, theta=theta, post_impact_end_time=post_end_time,
+            resample_hz=self.cfg.resample_hz, analog=analog, time_analog=analog_times,
         )

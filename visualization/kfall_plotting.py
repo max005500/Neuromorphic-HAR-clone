@@ -13,12 +13,16 @@ if TYPE_CHECKING:
 def _annotate_fall(axis, window: WindowData, start: float, stop: float) -> None:
     onset = window.fall_onset_time
     impact = window.fall_impact_time
+    post_end = getattr(window, "post_impact_end_time", None)
     if onset is not None and np.isfinite(onset) and onset <= stop:
         end = min(stop, impact) if impact is not None and np.isfinite(impact) else stop
         if end > max(start, onset):
             axis.axvspan(max(start, onset), end, color="#dc2626", alpha=0.055, linewidth=0)
+    if impact is not None and post_end is not None and max(start, impact) < min(stop, post_end):
+        axis.axvspan(max(start, impact), min(stop, post_end), color="#d97706", alpha=0.08, linewidth=0)
     for moment, label, color in ((onset, "Inicio caída", "#9333ea"),
-                                 (impact, "Impacto", "#dc2626")):
+                                 (impact, "Impacto", "#dc2626"),
+                                 (post_end, "Fin postimpacto", "#d97706")):
         if moment is None or not np.isfinite(moment) or not start <= moment <= stop:
             continue
         axis.axvline(moment, color=color, linestyle=":", linewidth=1.3, label=label)
@@ -66,6 +70,10 @@ def draw_window(
         original_axis.plot(time_raw, window.raw[:, channel], color="#334155",
                            linewidth=0.7, marker="o", markersize=2.2, alpha=0.8,
                            label="Original (100 Hz)")
+        if getattr(window, "resample_hz", None) is not None:
+            original_axis.plot(window.time_analog, window.analog[:, channel],
+                               color="#a855f7", linewidth=0, marker=".", markersize=2.5,
+                               alpha=.8, label=f"Interpolada ({window.resample_hz:g} Hz)")
         if show_reconstruction:
             original_axis.step(time_events, window.reconstructed[:, channel], where="post",
                                color="#059669", linewidth=1.0, alpha=0.85,
@@ -99,7 +107,8 @@ def draw_window(
         if row == 0:
             handles, labels = original_axis.get_legend_handles_labels()
             signal_entries = [(handle, label) for handle, label in zip(handles, labels)
-                              if label in {"Interpolada", "Original (100 Hz)", "Reconstrucción ΣΔ"}]
+                              if label in {"Interpolada", "Original (100 Hz)", "Reconstrucción ΣΔ"}
+                              or label.startswith("Interpolada (")]
             original_axis.legend([entry[0] for entry in signal_entries],
                                  [entry[1] for entry in signal_entries],
                                  loc="best", fontsize=7, framealpha=0.8)

@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 import numpy as np
+from preprocess.kfall_labels import class_names
 
 
-CLASS_NAMES = ("Fall", "Dynamic", "Static")
 FALL_COLOR = "#dc2626"
 NORMAL_COLOR = "#16a34a"
 UNKNOWN_COLOR = "#94a3b8"
 POST_IMPACT_COLOR = "#64748b"
+POSTIMPACT_CLASS_COLOR = "#d97706"
 
 
 class ReplayPlot:
@@ -45,7 +46,24 @@ class ReplayPlot:
             raise ValueError("Recording times must contain at least two increasing samples.")
         if self.endpoint_times.ndim != 1 or np.any(np.diff(self.endpoint_times) <= 0):
             raise ValueError("Prediction endpoint times must be increasing.")
-        if len(self.endpoint_times) != len(replay.predicted_classes) or replay.probabilities.shape != (len(self.endpoint_times), 3):
+        probabilities = np.asarray(replay.probabilities)
+        if probabilities.ndim != 2 or probabilities.shape[1] not in {3, 4}:
+            raise ValueError("Replay probabilities must have three or four activity classes.")
+        self.class_names = class_names(probabilities.shape[1])
+        self.post_impact_end_time = getattr(replay, "post_impact_end_time", None)
+        if self.post_impact_end_time is None and replay.fall_impact_time is not None:
+            duration = float(getattr(replay, "post_impact_seconds", 0.0)
+                             or getattr(replay, "config", {}).get("post_impact_seconds", 0.0))
+            if duration > 0:
+                self.post_impact_end_time = replay.fall_impact_time + duration
+        if self.post_impact_end_time is not None and (
+            not np.isfinite(self.post_impact_end_time) or replay.fall_impact_time is None
+            or self.post_impact_end_time <= replay.fall_impact_time
+        ):
+            raise ValueError("The postimpact interval must end after the impact.")
+        if (len(self.endpoint_times) != len(replay.predicted_classes)
+                or probabilities.shape[0] != len(self.endpoint_times)
+                or not np.isin(replay.predicted_classes, list(self.class_names)).all()):
             raise ValueError("Prediction endpoints, classes, and probabilities must align.")
 
         self.raw_lines = []
@@ -67,12 +85,18 @@ class ReplayPlot:
         self.axes[4].set(ylim=(-0.12, 1.85), yticks=[1.3, 0.3],
                          yticklabels=["Predicción", "Etiqueta real"],
                          xlabel="Tiempo desde el inicio de la grabación (s)")
-        self.axes[4].legend(handles=[
+        legend = [
             Patch(facecolor=FALL_COLOR, label="Caída"),
             Patch(facecolor=NORMAL_COLOR, label="Sin caída"),
             Patch(facecolor=UNKNOWN_COLOR, label="Sin predicción"),
-            Patch(facecolor=POST_IMPACT_COLOR, label="Posimpacto"),
-        ], loc="upper right", bbox_to_anchor=(1, 1.30), fontsize=8, ncol=4, frameon=False)
+        ]
+        if len(self.class_names) == 4:
+            legend.extend([Patch(facecolor=POSTIMPACT_CLASS_COLOR, label="Postimpacto"),
+                           Patch(facecolor=POST_IMPACT_COLOR, label="Sin etiqueta temporal")])
+        else:
+            legend.append(Patch(facecolor=POST_IMPACT_COLOR, label="Posimpacto"))
+        self.axes[4].legend(handles=legend, loc="upper right", bbox_to_anchor=(1, 1.30),
+                            fontsize=8, ncol=len(legend), frameon=False)
 
         self.cursor_lines = []
         self.annotation_lines: list[tuple[float, Any]] = []
@@ -84,13 +108,15 @@ class ReplayPlot:
             axis.spines[["top", "right"]].set_visible(False)
             axis.tick_params(axis="x", labelbottom=row == 4)
             for moment, color in ((replay.fall_onset_time, "#9333ea"),
-                                   (replay.fall_impact_time, "#dc2626")):
+                                   (replay.fall_impact_time, "#dc2626"),
+                                   (self.post_impact_end_time, POSTIMPACT_CLASS_COLOR)):
                 if moment is not None:
                     line = axis.axvline(moment, color=color, linestyle=":", linewidth=1.2, visible=False)
                     self.annotation_lines.append((float(moment), line))
         self.annotation_texts = []
         for moment, text, color in ((replay.fall_onset_time, "Inicio real", "#9333ea"),
-                                     (replay.fall_impact_time, "Impacto real", "#dc2626")):
+                                     (replay.fall_impact_time, "Impacto real", "#dc2626"),
+                                     (self.post_impact_end_time, "Fin postimpacto", POSTIMPACT_CLASS_COLOR)):
             if moment is not None:
                 label = self.axes[0].text(moment, 0.95, text, transform=self.axes[0].get_xaxis_transform(),
                                            rotation=90, va="top", ha="right", fontsize=8, color=color, visible=False)
@@ -116,7 +142,8 @@ class ReplayPlot:
         for index in range(available):
             left = float(self.endpoint_times[index])
             right = min(now, float(self.endpoint_times[index + 1])) if index + 1 < available else now
-            color = FALL_COLOR if int(self.replay.predicted_classes[index]) == 0 else NORMAL_COLOR
+            label = int(self.replay.predicted_classes[index])
+            color = FALL_COLOR if label == 0 else POSTIMPACT_CLASS_COLOR if label == 3 else NORMAL_COLOR
             if intervals and intervals[-1][2] == color and intervals[-1][1] == left:
                 intervals[-1] = (intervals[-1][0], right, color)
             else:
@@ -132,17 +159,27 @@ class ReplayPlot:
         if now > onset:
             intervals.append((max(start, onset), min(now, impact), FALL_COLOR))
         if now > impact:
-            intervals.append((max(start, impact), now, POST_IMPACT_COLOR))
+            if len(self.class_names) == 4 and self.post_impact_end_time is not None:
+                end = self.post_impact_end_time
+                intervals.append((max(start, impact), min(now, end), POSTIMPACT_CLASS_COLOR))
+                if now > end:
+                    intervals.append((max(start, end), now, POST_IMPACT_COLOR))
+            else:
+                intervals.append((max(start, impact), now, POST_IMPACT_COLOR))
         return intervals
 
     def _real_phase(self, now: float) -> str:
         onset, impact = self.replay.fall_onset_time, self.replay.fall_impact_time
         if onset is None:
-            return CLASS_NAMES[int(self.replay.record["label_id"])]
+            return self.class_names[int(self.replay.record["label_id"])]
         if now < onset:
             return "Precaída / sin caída"
         if now < impact:
             return "Caída (preimpacto)"
+        if len(self.class_names) == 4:
+            if self.post_impact_end_time is not None and now < self.post_impact_end_time:
+                return "Postimpacto"
+            return "Fuera del intervalo etiquetado"
         return "Posimpacto"
 
     def update(self, time_seconds: float, sensor: str | None = None) -> dict[str, Any]:
@@ -176,7 +213,8 @@ class ReplayPlot:
             prediction_age = now - prediction_time
             predicted_class = int(self.replay.predicted_classes[prediction_index])
             p_fall = float(self.replay.probabilities[prediction_index, 0])
-            predicted_label = "Caída" if predicted_class == 0 else f"Sin caída · {CLASS_NAMES[predicted_class]}"
+            predicted_label = ("Caída" if predicted_class == 0 else "Postimpacto" if predicted_class == 3
+                               else f"Sin caída · {self.class_names[predicted_class]}")
             begin = max(0, int(np.searchsorted(self.endpoint_times[:available], left, side="right")) - 1)
             probability_times = self.endpoint_times[begin:available].copy()
             probability_times[0] = max(left, probability_times[0])

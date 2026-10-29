@@ -11,6 +11,7 @@ import numpy as np
 
 from visualization.kfall_replay_data import prepare_replay
 from visualization.kfall_replay_plot import ReplayPlot
+from preprocess.kfall_labels import class_names
 
 
 class KFallReplayPlayer:
@@ -94,10 +95,13 @@ class KFallReplayPlayer:
         if prediction is None:
             text, color = "Modelo: sin predicción · esperando una ventana completa", "#64748b"
         else:
-            activity = {0: "Fall", 1: "Dynamic", 2: "Static"}[int(prediction)]
-            state = "CAÍDA" if prediction == 0 else "SIN CAÍDA"
+            activity = class_names(self.replay.probabilities.shape[1])[int(prediction)]
+            state = "CAÍDA" if prediction == 0 else "POSTIMPACTO" if prediction == 3 else "SIN CAÍDA"
             text = f"Modelo: {state} · clase {activity} · P(Fall) = {probability:.1%}"
-            color = "#dc2626" if prediction == 0 else "#15803d"
+            color = "#dc2626" if prediction == 0 else "#d97706" if prediction == 3 else "#15803d"
+            if self.replay.probabilities.shape[1] == 4:
+                index = int(info["prediction_index"])
+                text += f" · P(Postimpact) = {self.replay.probabilities[index, 3]:.1%}"
         self.prediction_text.set_text(text)
         self.prediction_text.set_color(color)
         self.truth_text.set_text(f"Etiqueta real: {info['real_phase']}")

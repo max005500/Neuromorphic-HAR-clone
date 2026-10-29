@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -16,6 +17,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from preprocess.event_encoding import sigma_delta
+from preprocess.kfall_labels import class_names, event_steps_for_samples, window_samples
 from preprocess.utils import class_counts, json_ready, load_json, save_json_atomic, subject_split_indices
 
 from preprocess.interpolate_signal import derive_output_length, interpolate_signal, interpolate_to_times, make_resample_plan
@@ -63,7 +65,7 @@ class DatasetDefaults:
 DATASET_DEFAULTS: dict[str, DatasetDefaults] = {
     "kfall": DatasetDefaults(
         raw_win=205,
-        label_names=SISFALL_LABELS,
+        label_names=class_names(4),
         theta_init=(0.1, 0.1, 0.1, 10.0, 10.0, 10.0),
         init_step=0.02,
         min_step=5e-4,
@@ -156,6 +158,10 @@ class RunConfig:
     val_ratio: float
     batch_size: int
     print_every_epoch: bool
+    window_seconds: float | None = None
+    post_impact_seconds: float = 0.0
+    endpoint_context: int | None = None
+    resample_hz: float | None = None
 
     @classmethod
     def from_args(cls, args: Any) -> "RunConfig":
@@ -167,6 +173,18 @@ class RunConfig:
             raise ValueError("SisFall fall-policy must be contain_peak or all.")
         if dataset == "kfall" and policy not in {"pre_impact", "annotated_interval"}:
             raise ValueError("KFall fall-policy must be pre_impact or annotated_interval.")
+        window_seconds = getattr(args, "window_seconds", None)
+        post_impact_seconds = getattr(args, "post_impact_seconds", None)
+        endpoint_context = getattr(args, "endpoint_context", None)
+        resample_hz = getattr(args, "resample_hz", None)
+        if dataset != "kfall" and (window_seconds is not None or endpoint_context is not None
+                                   or post_impact_seconds not in (None, 0) or resample_hz is not None):
+            raise ValueError("window-seconds, post-impact-seconds, endpoint-context, and resample-hz are KFall options.")
+        if dataset == "kfall":
+            window_seconds = 2.05 if window_seconds is None else float(window_seconds)
+            post_impact_seconds = 1.2 if post_impact_seconds is None else float(post_impact_seconds)
+        else:
+            post_impact_seconds = 0.0
         d = DATASET_DEFAULTS[dataset]
 
         def pick(name: str, default: Any) -> Any:
@@ -176,7 +194,7 @@ class RunConfig:
         theta_init = pick("theta_init", d.theta_init)
         theta_max = getattr(args, "theta_max", None)
 
-        return cls(
+        config = cls(
             dataset=dataset,
             data_root=Path(args.data_root),
             ups=float(args.ups),
@@ -220,7 +238,20 @@ class RunConfig:
             val_ratio=float(args.val_ratio),
             batch_size=int(args.batch_size),
             print_every_epoch=not bool(args.quiet_epochs),
+            window_seconds=window_seconds,
+            post_impact_seconds=post_impact_seconds,
+            endpoint_context=endpoint_context,
+            resample_hz=None if resample_hz is None else float(resample_hz),
         )
+        if dataset == "kfall":
+            from loaders.kfall_event_loader import KFallEventLoaderConfig
+
+            KFallEventLoaderConfig(raw_win=config.raw_win, out_win=config.out_len,
+                                   stride=config.window_stride, fall_policy=config.fall_policy,
+                                   post_impact_seconds=config.post_impact_seconds,
+                                   endpoint_context=config.endpoint_context,
+                                   resample_hz=config.resample_hz)
+        return config
 
     @property
     def defaults(self) -> DatasetDefaults:
@@ -228,10 +259,14 @@ class RunConfig:
 
     @property
     def raw_win(self) -> int:
+        if self.dataset == "kfall":
+            return window_samples(2.05 if self.window_seconds is None else self.window_seconds)
         return self.defaults.raw_win
 
     @property
     def label_names(self) -> dict[int, str]:
+        if self.dataset == "kfall":
+            return class_names(4 if self.post_impact_seconds > 0 else 3)
         return self.defaults.label_names
 
     @property
@@ -241,12 +276,17 @@ class RunConfig:
         if self.dataset == "sisfall" and self.raw_win == 410 and abs(float(self.ups) - 5.0) < 1e-12:
             return 2048
         if self.dataset == "kfall" and abs(float(self.ups) - 10.0) < 1e-12:
-            return 2048
+            return event_steps_for_samples(self.raw_win)
         return int(derive_output_length(self.raw_win, self.ups))
 
     @property
     def result_dir(self) -> Path:
         tag = f"{self.dataset}_subject_ups{safe_tag(self.ups)}_dz{safe_tag(self.dead_zone)}"
+        if self.dataset == "kfall":
+            context = self.raw_win if self.endpoint_context is None else self.endpoint_context
+            tag += f"_win{self.raw_win}_te{self.out_len}_post{safe_tag(self.post_impact_seconds)}_ctx{context}_stride{self.window_stride}"
+            if self.resample_hz is not None:
+                tag += f"_resample{safe_tag(self.resample_hz)}hz"
         return self.results_root / tag
 
 
@@ -404,10 +444,24 @@ def compute_theta_max(x_train: np.ndarray, cfg: RunConfig) -> np.ndarray:
 
 def build_split(x_native: np.ndarray, y: np.ndarray, cfg: RunConfig) -> SplitWindows:
     x_native = as_window_array(x_native)
-    plan = make_resample_plan(x_native.shape[1], cfg.out_len, method=cfg.interp_method, dtype=np.float32)
     x_interp = np.empty((x_native.shape[0], cfg.out_len, x_native.shape[-1]), dtype=np.float32)
-    for i in range(x_native.shape[0]):
-        x_interp[i] = interpolate_signal(x_native[i], plan=plan, dtype=np.float32)
+    if cfg.dataset == "kfall":
+        native_times, event_times = _time_grids(cfg)
+        for i in range(x_native.shape[0]):
+            analog, analog_times = x_native[i], native_times
+            if cfg.resample_hz is not None:
+                from preprocess.kfall_resampling import resample_kfall_signal
+
+                analog, analog_times = resample_kfall_signal(
+                    x_native[i], np.arange(x_native.shape[1], dtype=np.int64),
+                    sample_rate_hz=100.0, resample_hz=cfg.resample_hz,
+                )
+            x_interp[i] = interpolate_to_times(analog, analog_times, event_times,
+                                               method=cfg.interp_method, dtype=np.float32)
+    else:
+        plan = make_resample_plan(x_native.shape[1], cfg.out_len, method=cfg.interp_method, dtype=np.float32)
+        for i in range(x_native.shape[0]):
+            x_interp[i] = interpolate_signal(x_native[i], plan=plan, dtype=np.float32)
     return SplitWindows(
         x_native=x_native,
         x_interp=x_interp,
@@ -428,21 +482,28 @@ def prepare_data(cfg: RunConfig, logger: logging.Logger) -> PreparedData:
 
 def prepare_kfall(cfg: RunConfig, logger: logging.Logger) -> PreparedData:
     """Use the same annotated windows and subject groups as KFall training."""
-    from loaders.kfall_event_loader import KFallEventLoaderConfig, _source_signature, window_starts_for_record
+    from loaders.kfall_event_loader import KFallEventLoaderConfig, _source_signature, window_targets_for_record
     from preprocess.preprocess_kfall import load_kfall_3class
 
     root = cfg.data_root if (cfg.data_root / "sensor_data").is_dir() else cfg.data_root / "KFall"
-    recordings, labels, records, skipped = load_kfall_3class(root)
+    recordings, _, records, skipped = load_kfall_3class(root)
     window_cfg = KFallEventLoaderConfig(raw_win=cfg.raw_win, out_win=cfg.out_len,
-                                       stride=cfg.window_stride or 102, fall_policy=cfg.fall_policy)
+                                       stride=cfg.window_stride or 102, fall_policy=cfg.fall_policy,
+                                       post_impact_seconds=cfg.post_impact_seconds,
+                                       endpoint_context=cfg.endpoint_context,
+                                       resample_hz=cfg.resample_hz)
     indices = subject_split_indices([record["subject"] for record in records], cfg.split, cfg.seed)
     window_refs: dict[str, list[tuple[int, int]]] = {}
     window_labels: dict[str, np.ndarray] = {}
     for name, selected in zip(("train", "val", "test"), indices):
-        refs = [(int(fi), int(start)) for fi in selected
-                for start in window_starts_for_record(recordings[int(fi)], records[int(fi)], window_cfg)]
+        refs, targets = [], []
+        for fi in selected:
+            fi = int(fi)
+            starts, labels = window_targets_for_record(recordings[fi], records[fi], window_cfg)
+            refs.extend((fi, int(start)) for start in starts)
+            targets.extend(labels.tolist())
         window_refs[name] = refs
-        window_labels[name] = np.asarray([labels[fi] for fi, _ in refs], dtype=np.int64)
+        window_labels[name] = np.asarray(targets, dtype=np.int64)
 
     def sample(name: str, limit: int, seed: int, *, full: bool = False) -> SplitWindows:
         y = window_labels[name]
@@ -465,9 +526,21 @@ def prepare_kfall(cfg: RunConfig, logger: logging.Logger) -> PreparedData:
                            for name, selected in zip(("train", "val", "test"), indices)},
         "source_signature": _source_signature(root, root / "label_data"),
         "fall_policy": cfg.fall_policy, "window_stride": window_cfg.stride,
+        "raw_win": cfg.raw_win, "out_len": cfg.out_len,
+        "window_seconds": cfg.raw_win / 100.0,
+        "post_impact_seconds": cfg.post_impact_seconds,
+        "endpoint_context": cfg.endpoint_context,
+        "n_classes": len(cfg.label_names), "class_names": list(cfg.label_names.values()),
         "recordings": len(records), "skipped": skipped,
-        "counts_full": {name: class_counts(y, SISFALL_LABELS) for name, y in window_labels.items()},
+        "split_file_indices": {name: selected.tolist() for name, selected in zip(("train", "val", "test"), indices)},
+        "window_endpoints": {name: [[fi, int(records[fi]["frames"][start + cfg.raw_win - 1]), int(label)]
+                                    for (fi, start), label in zip(refs, window_labels[name])]
+                             for name, refs in window_refs.items()},
+        "counts_full": {name: class_counts(y, cfg.label_names) for name, y in window_labels.items()},
     }
+    if cfg.resample_hz is not None:
+        metadata.update(resample_hz=cfg.resample_hz, source_sample_rate_hz=100.0,
+                        resampling_policy="linear interpolation within each observed window; no extrapolation")
     logger.info("KFall subject groups: %s", metadata["split_subjects"])
     logger.info("KFall full window counts: %s", metadata["counts_full"])
     return PreparedData(
@@ -475,12 +548,16 @@ def prepare_kfall(cfg: RunConfig, logger: logging.Logger) -> PreparedData:
         val=sample("val", cfg.val_per_class, cfg.seed + 222),
         test_sampled=sample("test", cfg.test_per_class, cfg.seed + 333),
         test_full=sample("test", cfg.test_per_class, cfg.seed + 333, full=cfg.final_test_all),
-        label_names=SISFALL_LABELS, raw_win=cfg.raw_win, out_len=cfg.out_len,
+        label_names=cfg.label_names, raw_win=cfg.raw_win, out_len=cfg.out_len,
         t_native=t_native, t_interp=t_interp, metadata=metadata,
     )
 
 
 def _time_grids(cfg: RunConfig) -> tuple[np.ndarray, np.ndarray]:
+    if cfg.dataset == "kfall":
+        native = np.arange(cfg.raw_win, dtype=np.float64) / 100.0
+        events = np.linspace(0.0, native[-1], cfg.out_len, dtype=np.float32)
+        return native, events
     plan = make_resample_plan(cfg.raw_win, cfg.out_len, method=cfg.interp_method, dtype=np.float32)
     return plan.t_in.copy(), plan.t_out.copy()
 
@@ -814,7 +891,11 @@ class ThetaOptimizer:
         # Output handling and resume flags do not change the experimental data.
         for key in ("resume", "results_root", "workers", "executor", "keep_worker_cache", "print_every_epoch"):
             signature["config"].pop(key, None)
-        import json
+        if cfg.resample_hz is None:
+            signature["config"].pop("resample_hz", None)
+        if cfg.dataset != "kfall":
+            for key in ("window_seconds", "post_impact_seconds", "endpoint_context"):
+                signature["config"].pop(key, None)
         self.experiment_signature = hashlib.sha256(json.dumps(signature, sort_keys=True).encode("utf-8")).hexdigest()
 
         _worker_init(self._splits_with_chunks(), data.t_native, data.t_interp, data.label_names, cfg.sd_init, cfg.interp_method)
@@ -1171,6 +1252,8 @@ class ThetaOptimizer:
             },
             "elapsed_sec": float(elapsed),
         }
+        if self.cfg.resample_hz is not None:
+            result["resample_hz"] = float(self.cfg.resample_hz)
 
         self.logger.info("=" * 100)
         self.logger.info("Finished | best_epoch=%d | theta_best=%s", best_epoch, theta_best)

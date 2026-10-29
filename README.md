@@ -7,7 +7,8 @@ The repository provides scripts to:
 - generate Sigma-Delta event tensors,
 - load KFall sensor CSVs and temporal fall annotations from XLSX,
 - partition recordings by subject before creating event windows,
-- train a KFall three-class SCN for pre-impact fall detection,
+- train a KFall SCN with fall, dynamic, static, and post-impact labels,
+- compare 2.05, 3.30, and 4.10-second contexts with matched subjects and endpoints,
 - autotag SisFall static-posture windows,
 - optimize Sigma-Delta theta values,
 - train SisFall dual-head or single-head SCN models,
@@ -63,15 +64,54 @@ Download the sensor data and temporal labels from the [official KFall site](http
 
 Native filenames such as `S06T20R01.csv` and the documented form `SA06T20R01.csv` are both accepted. The loader reads `AccX`, `AccY`, `AccZ`, `GyrX`, `GyrY`, and `GyrZ` as floating-point values in **g** and **degrees per second**. It ignores Euler angles. It matches recordings to each subject's task/trial annotations and resolves `Fall_onset_frame` and `Fall_impact_frame` against the CSV's `FrameCounter`; frame numbers are not assumed to be row offsets. Missing, duplicate, or inconsistent fall annotations raise an error.
 
-The general activity classes follow the repository's SisFall grouping: the `Static` family includes stable postures and posture changes. Static task IDs are `1, 2, 3, 5, 11–19`; dynamic IDs are `4, 6–10, 35, 36`; fall IDs are `20–34`. This grouping is an adaptation for the model, not a native KFall three-class annotation.
+The activity families follow the repository's SisFall grouping: `Static` includes stable postures and posture changes. Static task IDs are `1, 2, 3, 5, 11–19`; dynamic IDs are `4, 6–10, 35, 36`; fall trials have IDs `20–34`. This grouping and the post-impact class are adaptations for the model, not native KFall activity labels.
 
-The default configuration uses 205 raw samples at 100 Hz, stride 102, and linear interpolation to 2048 event steps. Sigma-Delta encoding produces `(2048, 6, 2)` binary events and six offsets per window. These settings approximate the paper's 2.05-second window; they do not give KFall additional measured temporal resolution.
+Each window is labelled by its **last observed sample**. The default four-class task uses:
 
-`--fall-policy pre_impact` uses annotated falling windows whose last sample precedes impact. A window can include preceding normal motion as context; the impact and later signal are excluded before interpolation and encoding. `--fall-policy annotated_interval` also permits a window ending at the annotated impact sample, so its results should not be reported as strictly pre-impact.
+| ID | Class | Target at the window endpoint |
+|---|---|---|
+| 0 | `Fall` | `onset <= frame < impact` |
+| 1 | `Dynamic` | Dynamic ADL task family |
+| 2 | `Static` | Static/posture ADL task family |
+| 3 | `Postimpact` | `impact <= frame < impact + 120` at 100 Hz |
 
-Evaluation uses annotation-selected windows, including an extra endpoint immediately before impact; pre-onset windows from fall trials are excluded. Cached `lead_time_ms` describes the time remaining before impact at each window's endpoint. It is not measured warning time from a continuous alerting system. Window accuracy alone does not establish online sensitivity, false-alarm rate, or achieved anticipation.
+`Postimpact` lasts 1.20 seconds from the annotated impact, including the impact
+sample and excluding the end boundary. A post-impact input window can also
+contain earlier falling motion; the endpoint determines its target. Pre-onset
+parts of fall trials and samples after the post-impact interval have no inferred
+ADL class and are excluded from this window-label protocol. Short recordings
+are clipped to their available samples; no future data or padding is added.
 
-KFall supplies temporal fall annotations, but does not supply temporal **Stable Posture / Postural Transition** annotations. `train_kfall.py` therefore defaults to three-class single-head classification (`Fall`, `Dynamic`, `Static`). The optional `--head-mode dual` retains the paper's model layout with the posture head frozen and its loss disabled. It does not claim posture-supervision results.
+The default context uses 205 samples at 100 Hz, stride 102, and 2048 event steps.
+`--window-seconds` selects a longer context, preserving approximately the same
+encoder time scale by default:
+
+| Nominal context | Raw samples | Event steps | Event channels | Offsets |
+|---|---|---|---|---|
+| 2.05 s | 205 | 2048 | 12 | 6 |
+| 3.30 s | 330 | 3297 | 12 | 6 |
+| 4.10 s | 410 | 4096 | 12 | 6 |
+
+`--out-win` overrides the event length. Interpolation adds no measured sensor
+information. Nominal durations count samples; first-to-last sample spans are
+one sampling interval shorter (e.g. 2.04 s for 205 samples at 100 Hz).
+
+Fall windows exclude the impact sample. Postimpact windows receive class 3.
+`--post-impact-seconds` changes the post-impact interval; `0` restores the legacy
+three-class task and its original cache naming. The optional
+`--fall-policy annotated_interval` is available only with post-impact disabled,
+because assigning the impact to both classes would be ambiguous.
+
+Evaluation uses annotation-selected windows, including phase-end anchors. Cached
+`lead_time_ms` is the signed time from an endpoint to impact: positive for Fall,
+zero at impact, and negative for later Postimpact windows. It is not a measured
+warning time. Window accuracy alone does not establish continuous alarm quality.
+
+KFall has no temporal **Stable Posture / Postural Transition** annotations.
+`train_kfall.py` defaults to a four-class single head. The optional
+`--head-mode dual` keeps the activity head with four outputs and freezes the
+unsupervised posture head. Existing three-class checkpoints remain usable with
+their original caches; four-class experiments train a new classifier.
 
 The default thresholds `0.1 0.1 0.1 10 10 10` are starting values in KFall's physical units, **not optimized KFall parameters**. Do not reuse SisFall thresholds, which operate on raw sensor counts. Tune thresholds and model choices using training/validation subjects and reserve test subjects for final evaluation. This implementation does not reproduce the paper's reported accuracy or energy savings on KFall.
 
@@ -137,6 +177,7 @@ All scripts expose their options through argparse:
 ```bash
 python posture_tagging.py --help
 python optimize_theta.py --help
+python tune_kfall_thresholds.py --help
 python train_sisfall.py --help
 python train_kfall.py --help
 python train_ucihar.py --help
@@ -144,6 +185,7 @@ python plot_training.py --help
 python view_kfall.py --help
 python evaluate_kfall.py --help
 python animate_kfall.py --help
+python compare_kfall_windows.py --help
 python energy_report.py --help
 ```
 
@@ -161,10 +203,78 @@ KFall, with the same subject split and temporal window rule used for training:
 
 ```bash
 python optimize_theta.py --dataset kfall --data-root data --ups 10 --dead-zone 0.5 \
-  --split 0.8 0.1 0.1 --seed 0 --fall-policy pre_impact
+  --split 0.8 0.1 0.1 --seed 0 --fall-policy pre_impact \
+  --window-seconds 2.05 --post-impact-seconds 1.20 --resample-hz 200
 ```
 
-For KFall, UPS 10 resolves to 2048 event steps; `--out-len` overrides this length. Copy the six resulting threshold values into `train_kfall.py --theta ...`, keeping the seed, subject proportions, window stride, temporal policy, and encoding settings consistent. Both commands default to seed 0 and the same subject partition. Threshold optimization uses held-out subjects for validation and reports the test reconstruction error after selection.
+For KFall, UPS 10 scales the original 205-to-2048 ratio to the selected duration;
+`--out-len` overrides it. Keep window duration, post-impact interval, endpoint
+context, stride, subject split, and encoding settings consistent when transferring
+the resulting six values to `train_kfall.py --theta ...`. Optimization uses
+training/validation subjects for selection and reports test reconstruction error
+afterward. Use `--post-impact-seconds 0` for the legacy protocol.
+
+This optimizer minimizes reconstruction error, not the SNN classification error.
+For thresholds selected by classification performance, use the validation search:
+
+```bash
+python tune_kfall_thresholds.py --window-seconds 2.05 --resample-hz 200 \
+  --endpoint-context 410 --epochs 3 --train-per-class 128 --device cpu --workers 0
+```
+
+The search tests combinations of accelerometer and gyroscope threshold scales,
+starting from `[0.1, 0.1, 0.1, 10, 10, 10]` in g and degrees/s. Each candidate
+uses theta as the reconstruction step; `--dead-zone 0.5` emits an event when
+the absolute difference from the reconstruction exceeds half that step.
+Every candidate
+trains a fresh SNN with the same initialization, subject partitions, and sampled
+training windows. Validation retains all its windows. Candidates run with
+`--validation-only`; test inference is reserved for the chosen configuration's
+final evaluation. Selection uses validation macro-F1 by default, so every class
+contributes equally. This is the best candidate in a finite search, not a claim
+of a global optimum. A small training subset makes exploration faster; confirm
+the selected thresholds using full training and additional seeds.
+
+Search outputs include candidate metrics, a comparison plot, and
+`best_theta.json`. Apply the saved six thresholds in a full training run using
+`train_kfall.py --theta-file PATH/TO/best_theta.json --resample-hz 200`, preserving
+the search window duration, endpoint context, split, and encoding settings.
+
+Refine around a previous winner, or start from an `optimize_theta.py` result,
+using `--theta-file` instead of six explicit `--theta` values. For example:
+
+```bash
+python tune_kfall_thresholds.py \
+  --theta-file results/kfall_threshold_search/best_theta.json \
+  --acc-scales 0.75 1 1.25 --gyro-scales 0.75 1 1.25 \
+  --window-seconds 2.05 --resample-hz 200 --endpoint-context 410 \
+  --epochs 3 --train-per-class 128 --device cpu --workers 0 \
+  --reuse-completed --results-dir results/kfall_threshold_refinement
+```
+
+## KFall interpolation at 200 Hz
+
+```bash
+python train_kfall.py --preprocess-only --resample-hz 200 --workers 0
+python compare_kfall_windows.py --mode preprocess --resample-hz 200 --workers 0
+```
+
+`--resample-hz 200` adds a linear interpolation stage inside each observed
+window. Acquisition and annotation frame counters stay at 100 Hz; interpolated
+timestamps are spaced by 5 ms. Both endpoints remain observed samples, so native
+windows of 205, 330, and 410 samples produce 409, 659, and 819 intermediate
+values, respectively. The nominal 2.05-second window spans 2.04 seconds between
+its first and last sample. No samples beyond the prediction endpoint are used.
+
+The intermediate analog grid and the event encoder grid are separate. Event
+lengths remain 2048, 3297, and 4096 unless explicitly overridden. The original
+pipeline already interpolated directly from 100 Hz to this finer event grid;
+linear interpolation through a 200 Hz grid gives the same underlying curve,
+apart from rounding. It adds no independent measurements or recordings and does
+not increase the sensor's acquisition frequency. Caches record the extra stage
+and use distinct names. The viewer also displays the intermediate samples.
+
+## Theta optimization for SisFall and UCI HAR
 
 SisFall:
 
@@ -188,11 +298,12 @@ python optimize_theta.py --dataset sisfall --data-root data --ups 5 --dead-zone 
 
 ## Training
 
-KFall, with disjoint subjects and pre-impact fall windows:
+KFall, with disjoint subjects and four endpoint-labelled classes:
 
 ```bash
 python train_kfall.py --dataset-root data/KFall \
   --split 0.8 0.1 0.1 --seed 0 \
+  --window-seconds 2.05 --post-impact-seconds 1.20 \
   --epochs 100 --batch-size 128 --workers 4
 ```
 
@@ -201,6 +312,10 @@ Build the event cache and inspect the split metadata without training:
 ```bash
 python train_kfall.py --preprocess-only --workers 0
 ```
+
+New default caches have names identifying their context, event length, and
+post-impact interval, keeping the original `kfall_event_loader_default` cache
+separate. Use `--post-impact-seconds 0` to reproduce the old three-class setup.
 
 The default subject proportions are approximately 80% training, 10% validation, and 10% test: 26/3/3 participants for all 32 KFall subjects. Subject counts are rounded to whole participants, so window counts need not follow those proportions. Every recording and overlapping window from a participant stays in that participant's split. The split and source-recording metadata are saved in the cache and copied into each training run's `dataset_metadata.json`; the seed makes the partition reproducible. Changed split/encoding settings invalidate the event cache.
 
@@ -251,6 +366,57 @@ python plot_training.py runs/kfall_scn_YYYYMMDD_HHMMSS
 
 KFall runs save the best validation checkpoint, history, test predictions, a classification report, confusion matrices, and dataset metadata. Cached events are read on demand during training to avoid converting the complete cache to floating-point tensors in RAM.
 
+## Compare KFall window durations
+
+Audit coverage, build all three caches, or train all three models:
+
+```bash
+python compare_kfall_windows.py --mode inspect
+python compare_kfall_windows.py --mode preprocess --workers 0
+python compare_kfall_windows.py --mode train --epochs 100 --workers 4
+
+# A short exploratory comparison on CPU.
+python compare_kfall_windows.py --mode train --epochs 3 --batch-size 32 --device cpu --workers 0 \
+  --results-dir results/kfall_window_comparison_3epochs_b32 --reuse-completed --parallel-runs 2
+```
+
+All durations use the same seed, subject partitions, four-class targets,
+thresholds, and endpoint stride. By default, `--endpoint-policy matched` requires
+410 samples of available history for **every** model. The three datasets then
+contain the same `(recording, endpoint, label)` examples, with only their earlier
+context differing. Endpoint/label hashes are checked before and after encoding.
+The 2.05-second baseline is retrained on this same four-class task; an earlier
+three-class checkpoint is not a comparable baseline.
+
+The audit also reports each duration's natural coverage. Longer contexts can
+lose falls whose impacts occur too early in a recording. On the supplied dataset
+with seed 0, 4.10 seconds leaves 105 of 212 test fall recordings without a valid
+pre-impact window; 3.30 seconds leaves 35, and 2.05 seconds leaves none. These
+counts describe recordings, not window-level recall. `--endpoint-policy natural`
+retains each duration's available examples, but then the evaluated examples differ.
+
+With matched endpoints and the supplied dataset, every variant has 15,559 train,
+1,735 validation, and 1,856 test windows. Test targets are Fall 191, Dynamic 591,
+Static 667, and Postimpact 407, across the same 26/3/3 subjects.
+
+`--event-length-policy scaled` uses the event lengths in the table above. The
+optional `fixed` policy keeps `--fixed-out-win 2048` for all durations; that also
+changes temporal resolution, so it is a different experiment.
+
+Outputs under `--results-dir` include `window_plan.json`, `window_coverage.csv`,
+`window_counts.png`, `natural_window_counts.png`, and per-duration cache paths in
+`comparison.json`. Training additionally writes a metric comparison CSV/JSON and
+`validation_comparison.png`. Checkpoints are selected by validation loss within
+each run. Comparison tables do not choose a winner using test scores. Short
+exploratory runs should be followed by longer training and repeated seeds before
+drawing conclusions about window duration.
+
+`--reuse-completed` checks configuration, checkpoint, and cache provenance before
+reusing a finished run. `--parallel-runs` controls independent experiment
+processes; the default is one. Add `--resample-hz 200` to compare all durations
+with the same intermediate interpolation stage.
+Reported wall times include resource contention when experiments run concurrently.
+
 ## Evaluate the best KFall checkpoint
 
 Evaluate an existing run without training again:
@@ -278,8 +444,8 @@ Results are saved under the run's `metrics/test_best/`:
 - `confusion_matrix.png`: counts and normalization by the true class.
 - `classification_report.txt` and `.json`: class precision, recall, F1, support.
 - `predictions.csv`: original test-window index, subject, recording, true and
-  predicted classes, all three softmax probabilities, and annotated time
-  remaining before impact.
+  predicted classes, three or four softmax probabilities according to the saved
+  classifier, and signed time relative to impact.
 - NPY files with targets, predictions, probabilities, window indices, and
   confusion matrices.
 
@@ -337,8 +503,10 @@ never extend beyond the playback cursor.
 Ground truth distinguishes the annotated onset-to-impact falling interval from
 the post-impact period. Post-impact is shown separately because the normal
 activity class there is not temporally annotated. The model's binary fall
-indicator uses the argmax of its three output classes, and the probability panel
-shows its softmax `P(Fall)`.
+indicator uses the argmax of its saved output classes, and the probability panel
+shows softmax `P(Fall)`. Four-class runs display Postimpact separately for the
+configured 1.20-second interval, then show that the remaining time is unlabelled.
+Legacy three-class runs keep their original post-impact display.
 
 Predictions are computed before playback for this visualization. Playback speed
 does not measure inference latency, and this demonstration is separate from
@@ -366,6 +534,9 @@ python view_kfall.py
 
 # Start with pre-impact fall windows and the gyroscope's X/Y/Z axes.
 python view_kfall.py --split test --class fall --sensor gyro
+
+# Inspect a new four-class comparison cache (directory from comparison.json).
+python view_kfall.py --cache-dir PATH_TO_COMPARISON_CACHE --class postimpact
 ```
 
 The viewer shows three signal/event pairs. Switch between acceleration (g) and

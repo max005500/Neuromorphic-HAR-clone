@@ -13,8 +13,9 @@ from evaluate_kfall import _device, _load_checkpoint, _subject
 from evaluation.kfall_data import load_evaluation_data
 from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events
 from preprocess.preprocess_kfall import FILE_RE, load_record
+from preprocess.kfall_labels import class_names
 from train.utils import extract_single_logits, make_autocast, set_seed
-from train_kfall import CLASS_NAMES, build_model
+from train_kfall import build_model
 from visualization.kfall_data import KFallWindowStore
 
 
@@ -41,6 +42,8 @@ class ReplayData:
     cache_dir: Path
     subject: str
     label: str
+    post_impact_seconds: float = 0.0
+    post_impact_end_time: float | None = None
 
 
 def prediction_index_at(replay: ReplayData, time: float) -> int | None:
@@ -171,17 +174,21 @@ def prepare_replay(
             batch_offsets = torch.as_tensor(np.stack(offsets), dtype=torch.float32, device=dev)
             with make_autocast(bool(cfg.amp and dev.type == "cuda")):
                 logits = extract_single_logits(model(batch_events, offset=batch_offsets))
-                if logits.shape != (len(events), 3) or not torch.isfinite(logits).all():
-                    raise ValueError("The saved checkpoint produced invalid three-class replay logits.")
+                if logits.shape != (len(events), cfg.n_classes) or not torch.isfinite(logits).all():
+                    raise ValueError("The saved checkpoint produced invalid replay activity logits.")
             probability_batches.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
     probabilities = np.concatenate(probability_batches)
     predicted = probabilities.argmax(axis=1).astype(np.int64)
     times = (frames - frames[0]).astype(np.float64) / encoder.sample_rate_hz
     endpoint_times = times[endpoints]
-    onset_time = impact_time = None
+    onset_time = impact_time = post_end_time = None
     if record["label_id"] == 0:
         onset_time = (int(record["fall_onset_frame"]) - int(frames[0])) / encoder.sample_rate_hz
         impact_time = (int(record["fall_impact_frame"]) - int(frames[0])) / encoder.sample_rate_hz
+        if encoder.post_impact_seconds > 0:
+            post_end_frame = int(record.get("post_impact_end_frame", int(record["fall_impact_frame"]) +
+                                            round(encoder.post_impact_seconds * encoder.sample_rate_hz)))
+            post_end_time = (post_end_frame - int(frames[0])) / encoder.sample_rate_hz
     for array in (signal, frames, times, endpoints, endpoint_times, probabilities, predicted):
         array.setflags(write=False)
     return ReplayData(
@@ -193,5 +200,7 @@ def prepare_replay(
         best_epoch=saved["epoch"], best_val_loss=float(saved["best_val_loss"]),
         fall_onset_time=onset_time, fall_impact_time=impact_time,
         config=dict(saved["config"]), cache_dir=resolved_cache,
-        subject=record["subject"], label=CLASS_NAMES[int(record["label_id"])],
+        subject=record["subject"], label=class_names(cfg.n_classes)[int(record["label_id"])],
+        post_impact_seconds=float(getattr(encoder, "post_impact_seconds", 0.0)),
+        post_impact_end_time=post_end_time,
     )

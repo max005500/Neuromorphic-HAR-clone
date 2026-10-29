@@ -11,6 +11,7 @@ import numpy as np
 
 from visualization.kfall_data import KFallWindowStore
 from visualization.kfall_plotting import draw_window
+from preprocess.kfall_labels import class_names
 
 CLASS_FILTERS = {"Todas": None, "Fall": 0, "Dynamic": 1, "Static": 2}
 SENSOR_FILTERS = {"Acelerómetro": "acc", "Giroscopio": "gyro"}
@@ -28,6 +29,8 @@ class KFallViewer:
         from matplotlib import pyplot as plt
 
         self.store = store
+        count = getattr(store, "n_classes", 4 if store.config.get("post_impact_seconds", 0) > 0 else 3)
+        self.class_filters = {"Todas": None, **{name: index for index, name in class_names(count).items()}}
         self.sensor = sensor
         self.show_reconstruction = show_reconstruction
         self.export_dir = Path(export_dir)
@@ -104,8 +107,9 @@ class KFallViewer:
         lines = [f"CSV: {window.path.name} · filas {window.start}:{window.stop} (fin excluido) · "
                  f"frames {window.frames[0]}–{window.end_frame} · θ = [{theta}] {unit} · offsets = [{offsets}] {unit}"]
         if window.fall_onset_time is not None:
-            lines.append(f"Inicio de caída: {window.fall_onset_time:.3f} s · impacto anotado: {window.fall_impact_time:.3f} s · "
-                         f"tiempo restante al impacto: {window.lead_time_ms:.1f} ms")
+            margin = (f"tiempo restante al impacto: {window.lead_time_ms:.1f} ms" if window.lead_time_ms >= 0
+                      else f"tiempo desde el impacto: {-window.lead_time_ms:.1f} ms")
+            lines.append(f"Inicio de caída: {window.fall_onset_time:.3f} s · impacto anotado: {window.fall_impact_time:.3f} s · {margin}")
         else:
             lines.append("Actividad cotidiana: sin anotación temporal de caída.")
         self.details.set_text("\n".join(lines))
@@ -124,7 +128,7 @@ class KFallViewer:
             self.widgets[name] = widget
 
         radio("split", [0.835, 0.745, 0.145, 0.12], ["train", "val", "test"], "Partición", self._on_split)
-        radio("class", [0.835, 0.535, 0.145, 0.16], list(CLASS_FILTERS), "Clase", self._on_class)
+        radio("class", [0.835, 0.535, 0.145, 0.16], list(self.class_filters), "Clase", self._on_class)
         radio("sensor", [0.835, 0.38, 0.145, 0.10], list(SENSOR_FILTERS), "Sensor", self._on_sensor)
 
         subject_axis = self.figure.add_axes([0.845, 0.282, 0.125, 0.035])
@@ -161,7 +165,7 @@ class KFallViewer:
         try:
             for key, labels, value in (
                 ("split", ["train", "val", "test"], self.split),
-                ("class", list(CLASS_FILTERS), next(label for label, value in CLASS_FILTERS.items() if value == self.class_id)),
+                ("class", list(self.class_filters), next(label for label, value in self.class_filters.items() if value == self.class_id)),
                 ("sensor", list(SENSOR_FILTERS), next(label for label, value in SENSOR_FILTERS.items() if value == self.sensor)),
             ):
                 if self.widgets[key].value_selected != value:
@@ -196,7 +200,7 @@ class KFallViewer:
         self._safely(select)
 
     def _on_class(self, label) -> None:
-        self._safely(lambda: self.set_filters(self.split, CLASS_FILTERS[label], self.subject))
+        self._safely(lambda: self.set_filters(self.split, self.class_filters[label], self.subject))
 
     def _on_subject(self, text) -> None:
         self._safely(lambda: self.set_filters(self.split, self.class_id, self._normalize_subject(text)))
@@ -257,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", type=Path, default=None, help="Override the KFall source root if the dataset has moved.")
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--sensor", choices=["acc", "gyro"], default="acc")
-    parser.add_argument("--class", dest="class_filter", choices=["all", "fall", "dynamic", "static"], default="all")
+    parser.add_argument("--class", dest="class_filter", choices=["all", "fall", "dynamic", "static", "postimpact", "postimpacto"], default="all")
     parser.add_argument("--subject", default=None, help="Filter by subject ID, e.g. SA06.")
     parser.add_argument("--window", type=int, default=None, help="Actual zero-based window index within the selected split.")
     parser.add_argument("--no-reconstruction", action="store_true", help="Hide the reconstructed signal overlay.")
@@ -280,7 +284,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         store = KFallWindowStore(args.cache_dir, dataset_root=args.dataset_root)
-        class_id = {"all": None, "fall": 0, "dynamic": 1, "static": 2}[args.class_filter]
+        class_id = {"all": None, "fall": 0, "dynamic": 1, "static": 2, "postimpact": 3, "postimpacto": 3}[args.class_filter]
         viewer = KFallViewer(store, split=args.split, sensor=args.sensor, class_id=class_id,
                              subject=args.subject, index=args.window, show_reconstruction=not args.no_reconstruction,
                              interactive=args.save is None, export_dir=args.export_dir)

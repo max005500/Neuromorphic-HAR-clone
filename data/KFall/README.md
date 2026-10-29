@@ -33,8 +33,18 @@ Run these commands from the repository root, with the project dependencies insta
 # Prepare and cache train/validation/test partitions without training.
 python train_kfall.py --preprocess-only --workers 0
 
+# Prepare 2.05 / 3.30 / 4.10-second windows with the same comparison endpoints.
+python compare_kfall_windows.py --mode preprocess --workers 0
+
 # Train using the prepared event windows.
 python train_kfall.py --epochs 100 --batch-size 128 --workers 4
+
+# Interpolate observed signals from 100 to 200 Hz before event encoding.
+python train_kfall.py --preprocess-only --resample-hz 200 --workers 0
+
+# Explore thresholds using validation macro-F1, without test inference.
+python tune_kfall_thresholds.py --window-seconds 2.05 --resample-hz 200 \
+  --endpoint-context 410 --epochs 3 --train-per-class 128 --device cpu --workers 0
 
 # Compare original X/Y/Z signals with the cached Sigma-Delta events.
 python view_kfall.py --class fall
@@ -46,9 +56,18 @@ python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
 python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
 ```
 
-Subjects are assigned to disjoint partitions before windowing. The default fall
-policy excludes the impact sample and all later samples. Generated event caches
-are stored separately under `data/kfall_cache/`.
+Subjects are assigned to disjoint partitions before windowing. Default classes
+are Fall, Dynamic, Static, and Postimpact. Fall spans onset to just before impact;
+Postimpact spans impact through the following 1.20 seconds (end excluded).
+Targets describe the last sample of each input window. Use
+`--post-impact-seconds 0` for the original three-class task. Generated event
+caches are stored separately under `data/kfall_cache/` with distinct names.
+
+The 200 Hz stage inserts intermediate values; acquisition and annotation frames
+remain at 100 Hz. It does not create independent measurements or new recordings.
+The event encoder retains its separate temporal grid. Threshold searches save
+`best_theta.json`, which can be supplied to training with `--theta-file` while
+keeping the same window, subject split, interpolation, and encoder settings.
 
 Only this README is versioned from `data/KFall/`; downloaded sensor files and
 label workbooks are ignored by Git. See the [project README](../../README.md#kfall)

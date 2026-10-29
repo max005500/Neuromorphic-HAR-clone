@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-len", type=int, default=None, help="Interpolated temporal length. If omitted, it is inferred from dataset and UPS.")
     p.add_argument("--interp-method", choices=("linear", "zoh", "cubic"), default="linear")
     p.add_argument("--sd-init", choices=("x0", "zero"), default="x0")
+    p.add_argument("--resample-hz", type=float, default=None,
+                   help="KFall only: interpolate the observed 100 Hz analog window to this intermediate rate before the event grid, e.g. 200. No new measurements are acquired.")
 
     # Optimization controls. If omitted, dataset-specific defaults are used.
     p.add_argument("--max-epochs", type=int, default=None)
@@ -94,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Fall-dataset window extraction. Ignored by already-windowed datasets.
     p.add_argument("--window-stride", type=int, default=None)
+    p.add_argument("--window-seconds", type=float, default=None, help="KFall input duration at 100 Hz; defaults to 2.05 s.")
+    p.add_argument("--post-impact-seconds", type=float, default=None, help="KFall Postimpact label duration; defaults to 1.20 s. Use 0 for legacy three classes.")
+    p.add_argument("--endpoint-context", type=int, default=None, help="KFall shared endpoint context in raw samples, e.g. 410 for duration comparisons.")
     p.add_argument("--fall-policy", choices=("contain_peak", "all", "pre_impact", "annotated_interval"), default=None, help="Default: pre_impact for KFall, contain_peak for SisFall.")
     p.add_argument("--acc-sensor", choices=("ADXL345", "MMA8451Q"), default="ADXL345")
 
@@ -123,6 +128,8 @@ def main() -> dict:
     logger.info("dataset=%s | data_root=%s | UPS=%s | dead_zone=%s", cfg.dataset, cfg.data_root, cfg.ups, cfg.dead_zone)
     logger.info("results=%s | workers=%d | executor=%s | seed=%d | resume=%s", cfg.result_dir, cfg.workers, cfg.executor, cfg.seed, cfg.resume)
     logger.info("raw_win=%d | out_len=%d | interp=%s | sd_init=%s", cfg.raw_win, cfg.out_len, cfg.interp_method, cfg.sd_init)
+    if cfg.resample_hz is not None:
+        logger.info("KFall analog interpolation: 100 Hz -> %s Hz, within the observed window", cfg.resample_hz)
     logger.info("train/val/test per class=%s/%s/%s", cfg.train_per_class, cfg.val_per_class, cfg.test_per_class)
     logger.info("max_epochs=%d | patience=%d | patience_lr=%d | init_step=%s | min_step=%s", cfg.max_epochs, cfg.patience_global, cfg.patience_lr, cfg.init_step, cfg.min_step)
 
