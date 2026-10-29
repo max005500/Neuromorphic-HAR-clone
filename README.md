@@ -183,6 +183,7 @@ python train_kfall.py --help
 python train_ucihar.py --help
 python plot_training.py --help
 python view_kfall.py --help
+python view_kfall_variants.py --help
 python evaluate_kfall.py --help
 python animate_kfall.py --help
 python compare_kfall_windows.py --help
@@ -438,6 +439,52 @@ reusing a finished run. `--parallel-runs` controls independent experiment
 processes; the default is one. Add `--resample-hz 200` to compare all durations
 with the same intermediate interpolation stage.
 Reported wall times include resource contention when experiments run concurrently.
+
+## Compare KFall signals across window durations
+
+`view_kfall_variants.py` opens a Matplotlib browser for the prepared variants.
+It joins windows by subject, recording, label, and final FrameCounter so every
+column shows the same prediction instant. The time axis ends at zero. Gray
+areas show the earlier context that is outside a shorter window.
+
+Prepare the calibrated 200 Hz variants and open their comparison:
+
+```bash
+python compare_kfall_windows.py --mode preprocess \
+  --durations 2.05 3.30 4.10 --resample-hz 200 \
+  --theta-file configs/kfall_theta_200hz.json --workers 0 \
+  --results-dir results/kfall_window_comparison_200hz_calibrated
+
+python view_kfall_variants.py \
+  --comparison results/kfall_window_comparison_200hz_calibrated/comparison.json \
+  --split test --class fall
+```
+
+The controls select all durations or one, train/validation/test, activity class,
+subject, accelerometer or gyroscope, and reconstruction visibility. Each row
+shows X, Y, or Z; each duration has an original/interpolated/reconstructed signal
+panel and its ON/OFF event panel. Navigation always retains matched endpoints
+across durations. Arrow keys move between windows; `s` saves a PNG.
+
+```bash
+# Initially show a single duration, with gyroscope postimpact windows.
+python view_kfall_variants.py --split test --class postimpact --sensor gyro --duration 3.30
+
+# Export without a desktop window; PNG, PDF and SVG are supported.
+python view_kfall_variants.py --split test --class fall \
+  --save results/kfall_variant_viewer/comparison.png
+```
+
+The default manifest is the calibrated 200 Hz comparison path above. Use
+`--comparison` for another experiment, or `--cache-dirs CACHE_A CACHE_B CACHE_C`
+to supply existing cache directories directly. `--dataset-root` locates the
+original CSVs if they have moved. The viewer reads existing caches and verifies
+displayed events against their source signals; it requires no model weights.
+
+Only windows shared by all variants are compared. Natural-duration caches can
+contain different endpoints; the footer reports each variant's count and the
+common intersection. `view_kfall.py --cache-dir CACHE` remains available to
+browse every window of a single cache.
 
 ## Evaluate the best KFall checkpoint
 

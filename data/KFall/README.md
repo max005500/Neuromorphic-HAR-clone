@@ -49,6 +49,11 @@ python tune_kfall_thresholds.py --window-seconds 2.05 --resample-hz 200 \
 # Compare original X/Y/Z signals with the cached Sigma-Delta events.
 python view_kfall.py --class fall
 
+# Compare the same endpoint across prepared 2.05 / 3.30 / 4.10-second variants.
+python view_kfall_variants.py \
+  --comparison results/kfall_window_comparison_200hz_calibrated/comparison.json \
+  --split test --class fall
+
 # Evaluate an existing run's best checkpoint on its held-out test subjects.
 python evaluate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
 
@@ -73,6 +78,14 @@ is included with the source code. Files under `results/`, including generated
 `best_theta.json` reports, are ignored by Git. From the repository root, use
 `--theta-file configs/kfall_theta_200hz.json --resample-hz 200`; select the window
 duration and endpoint context explicitly as described in the project README.
+
+The variant viewer shows all durations together or one at a time, with X/Y/Z
+signals, intermediate 200 Hz samples, reconstruction, and ON/OFF events. It
+offers subject, activity, split, and sensor filters. Generate its manifest with
+`compare_kfall_windows.py --mode preprocess --resample-hz 200 --theta-file
+configs/kfall_theta_200hz.json --results-dir
+results/kfall_window_comparison_200hz_calibrated` before opening the viewer.
+Use `--save results/kfall_variant_viewer/comparison.png` for a headless export.
 
 Only this README is versioned from `data/KFall/`; downloaded sensor files and
 label workbooks are ignored by Git. See the [project README](../../README.md#kfall)
