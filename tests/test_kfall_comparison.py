@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from tests.test_kfall_replay_gui import replay_fixture
 from animate_kfall_comparison import KFallComparisonPlayer, prepare_comparison, validate_comparison
+from visualization.kfall_replay_plot import CLASS_COLORS, POST_IMPACT_COLOR
 
 
 def fixtures():
@@ -74,3 +75,26 @@ class ComparisonTests(unittest.TestCase):
         player.toggle_play()
         player.restart()
         self.assertEqual(player.current_time, 0)
+
+    def test_four_classes_have_distinct_ribbons_and_probability_curves(self):
+        replays = fixtures()
+        for replay in replays:
+            replay.predicted_classes = np.arange(len(replay.endpoint_rows)) % 4
+            replay.probabilities = np.eye(4)[replay.predicted_classes]
+            replay.post_impact_seconds = 1.2
+            replay.post_impact_end_time = 5.2
+        player = KFallComparisonPlayer(replays, interactive=False)
+        player.seek(6)
+        for plot in player.plots:
+            self.assertEqual(set(plot.probability_lines), {0, 1, 2, 3})
+            self.assertTrue(all(len(line.get_xdata()) for line in plot.probability_lines.values()))
+            self.assertEqual({color for _, _, color in plot._prediction_intervals(6)
+                              if color in CLASS_COLORS.values()}, set(CLASS_COLORS.values()))
+            self.assertEqual(plot._truth_intervals(2)[0][2], POST_IMPACT_COLOR)
+            for label in (1, 2):
+                plot.replay.record['label_id'] = label
+                plot.replay.fall_onset_time = None
+                self.assertEqual(plot._truth_intervals(2)[0][2], CLASS_COLORS[label])
+        player.seek(0)
+        self.assertTrue(all(not len(line.get_xdata()) for plot in player.plots
+                            for line in plot.probability_lines.values()))

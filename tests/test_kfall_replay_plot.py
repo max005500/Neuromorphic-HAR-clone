@@ -70,7 +70,7 @@ class KFallReplayPlotTests(unittest.TestCase):
         self.assertEqual(following["predicted_label"], "Caída")
 
     def test_truth_onset_is_inclusive_and_impact_is_exclusive(self):
-        self.assertEqual(self.plot.update(1.499)["real_phase"], "Precaída / sin caída")
+        self.assertEqual(self.plot.update(1.499)["real_phase"], "Precaída · sin etiqueta Static/Dynamic")
         self.assertEqual(self.plot.update(1.5)["real_phase"], "Caída (preimpacto)")
         self.assertEqual(self.plot.update(3.499)["real_phase"], "Caída (preimpacto)")
         self.assertEqual(self.plot.update(3.5)["real_phase"], "Posimpacto")

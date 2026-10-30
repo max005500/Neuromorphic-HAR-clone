@@ -691,8 +691,10 @@ Reemplaza cada ruta por el directorio real mostrado como `saved_run` al entrenar
 contiene `checkpoints/best_model.pt`. También admite los directorios anidados
 producidos por `compare_kfall_windows.py`. No vuelve a entrenar los modelos.
 
-Cada columna muestra XYZ, P(Fall), predicción y etiqueta temporal real. El texto
-superior distingue Dynamic y Static; la banda verde agrupa ambas como «sin caída».
+Cada columna muestra XYZ, las probabilidades de las cuatro clases, predicción y
+etiqueta temporal real. Los colores distinguen Caída (rojo), Dinámico (azul),
+Estático (verde) y Postimpacto (naranja). Gris indica ausencia de predicción o de
+etiqueta temporal; antes del inicio de una caída no se inventa Static/Dynamic.
 Las decisiones comparten extremos cada 10 muestras originales (0.10 s), a partir
 de la muestra 410 (4.09 s desde la primera muestra). Se mantiene el último
 resultado hasta la siguiente decisión; antes del contexto común no hay predicción.

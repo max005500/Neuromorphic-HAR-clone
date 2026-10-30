@@ -10,7 +10,7 @@ import numpy as np
 from animate_kfall import KFallReplayPlayer
 from evaluate_kfall import _load_checkpoint
 from visualization.kfall_replay_data import prepare_replay
-from visualization.kfall_replay_plot import ReplayPlot
+from visualization.kfall_replay_plot import ReplayPlot, CLASS_COLORS, CLASS_LABELS
 
 
 def prepare_comparison(run_dirs, *, recording=None, **kwargs):
@@ -83,7 +83,7 @@ class KFallComparisonPlayer(KFallReplayPlayer):
             self.plots.append(plot)
         self.truth_text = self.figure.text(.065, .845, "", fontsize=11, color="#9333ea")
         self.figure.text(.065, .008,
-            "Rojo: caída · verde: sin caída · naranja: postimpacto · gris: sin decisión / sin etiqueta. "
+            "Rojo: caída · azul: dinámico · verde: estático · naranja: postimpacto · gris: sin decisión / sin etiqueta. "
             "Decisiones alineadas desde 4.09 s; no se usa información futura. Espacio: pausa; flechas: decisión.", fontsize=9)
         if interactive:
             self._build_controls()
@@ -103,9 +103,9 @@ class KFallComparisonPlayer(KFallReplayPlayer):
             else:
                 cls = int(info["predicted_class"])
                 confidence = replay.probabilities[index, cls]
-                text.set_text(f"{info['predicted_label']} ({confidence:.1%})\n"
+                text.set_text(f"{CLASS_LABELS[cls]} ({confidence:.1%})\n"
                               f"P(Fall): {info['p_fall']:.1%} · decisión {info['prediction_time']:.2f} s")
-                text.set_color("#dc2626" if cls == 0 else "#d97706" if cls == 3 else "#15803d")
+                text.set_color(CLASS_COLORS[cls])
         self.truth_text.set_text(f"t = {self.current_time:.2f} s · Etiqueta real: {infos[0]['real_phase']}")
         self._sync_controls()
         if draw:

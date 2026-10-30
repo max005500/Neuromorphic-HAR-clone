@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from visualization.kfall_replay_data import prepare_replay
-from visualization.kfall_replay_plot import ReplayPlot
+from visualization.kfall_replay_plot import ReplayPlot, CLASS_COLORS, CLASS_LABELS
 from preprocess.kfall_labels import class_names
 
 
@@ -96,9 +96,9 @@ class KFallReplayPlayer:
             text, color = "Modelo: sin predicción · esperando una ventana completa", "#64748b"
         else:
             activity = class_names(self.replay.probabilities.shape[1])[int(prediction)]
-            state = "CAÍDA" if prediction == 0 else "POSTIMPACTO" if prediction == 3 else "SIN CAÍDA"
+            state = CLASS_LABELS[int(prediction)].upper()
             text = f"Modelo: {state} · clase {activity} · P(Fall) = {probability:.1%}"
-            color = "#dc2626" if prediction == 0 else "#d97706" if prediction == 3 else "#15803d"
+            color = CLASS_COLORS[int(prediction)]
             if self.replay.probabilities.shape[1] == 4:
                 index = int(info["prediction_index"])
                 text += f" · P(Postimpact) = {self.replay.probabilities[index, 3]:.1%}"

@@ -10,9 +10,13 @@ from preprocess.kfall_labels import class_names
 
 FALL_COLOR = "#dc2626"
 NORMAL_COLOR = "#16a34a"
+DYNAMIC_COLOR = "#2563eb"
+STATIC_COLOR = NORMAL_COLOR
 UNKNOWN_COLOR = "#94a3b8"
 POST_IMPACT_COLOR = "#64748b"
 POSTIMPACT_CLASS_COLOR = "#d97706"
+CLASS_COLORS = {0: FALL_COLOR, 1: DYNAMIC_COLOR, 2: STATIC_COLOR, 3: POSTIMPACT_CLASS_COLOR}
+CLASS_LABELS = {0: "Caída", 1: "Dinámico", 2: "Estático", 3: "Postimpacto"}
 
 
 class ReplayPlot:
@@ -71,12 +75,17 @@ class ReplayPlot:
         for axis, color in zip(self.axes[:3], colors):
             line, = axis.plot([], [], color=color, linewidth=1.35)
             self.raw_lines.append(line)
-        self.probability_line, = self.axes[3].step([], [], where="post", color="#2563eb", linewidth=1.8)
-        self.probability_marker, = self.axes[3].plot([], [], "o", color="#2563eb", markersize=4)
+        self.probability_lines = {}
+        for label in self.class_names:
+            line, = self.axes[3].step([], [], where="post", color=CLASS_COLORS[label],
+                                     linewidth=1.4, label=CLASS_LABELS[label])
+            self.probability_lines[label] = line
+        self.probability_line = self.probability_lines[0]
+        self.probability_marker, = self.axes[3].plot([], [], "o", color=FALL_COLOR, markersize=4)
         self.axes[3].set_ylim(0, 1)
         self.axes[3].yaxis.set_major_formatter(PercentFormatter(xmax=1, decimals=0))
-        self.axes[3].set_ylabel("P(Fall)")
-        self.axes[3].set_title("Probabilidad de caída · último resultado disponible", fontsize=9, loc="left")
+        self.axes[3].set_ylabel("Probabilidad")
+        self.axes[3].set_title("Probabilidades por clase · último resultado disponible", fontsize=9, loc="left")
 
         self.prediction_collection = PolyCollection([], edgecolors="none")
         self.truth_collection = PolyCollection([], edgecolors="none")
@@ -85,18 +94,15 @@ class ReplayPlot:
         self.axes[4].set(ylim=(-0.12, 1.85), yticks=[1.3, 0.3],
                          yticklabels=["Predicción", "Etiqueta real"],
                          xlabel="Tiempo desde el inicio de la grabación (s)")
-        legend = [
-            Patch(facecolor=FALL_COLOR, label="Caída"),
-            Patch(facecolor=NORMAL_COLOR, label="Sin caída"),
-            Patch(facecolor=UNKNOWN_COLOR, label="Sin predicción"),
-        ]
+        legend = [Patch(facecolor=CLASS_COLORS[label], label=CLASS_LABELS[label])
+                  for label in self.class_names]
+        legend.append(Patch(facecolor=UNKNOWN_COLOR, label="Sin predicción"))
         if len(self.class_names) == 4:
-            legend.extend([Patch(facecolor=POSTIMPACT_CLASS_COLOR, label="Postimpacto"),
-                           Patch(facecolor=POST_IMPACT_COLOR, label="Sin etiqueta temporal")])
+            legend.append(Patch(facecolor=POST_IMPACT_COLOR, label="Sin etiqueta temporal"))
         else:
             legend.append(Patch(facecolor=POST_IMPACT_COLOR, label="Posimpacto"))
         self.axes[4].legend(handles=legend, loc="upper right", bbox_to_anchor=(1, 1.30),
-                            fontsize=8, ncol=len(legend), frameon=False)
+                            fontsize=8, ncol=3, frameon=False)
 
         self.cursor_lines = []
         self.annotation_lines: list[tuple[float, Any]] = []
@@ -143,7 +149,7 @@ class ReplayPlot:
             left = float(self.endpoint_times[index])
             right = min(now, float(self.endpoint_times[index + 1])) if index + 1 < available else now
             label = int(self.replay.predicted_classes[index])
-            color = FALL_COLOR if label == 0 else POSTIMPACT_CLASS_COLOR if label == 3 else NORMAL_COLOR
+            color = CLASS_COLORS[label]
             if intervals and intervals[-1][2] == color and intervals[-1][1] == left:
                 intervals[-1] = (intervals[-1][0], right, color)
             else:
@@ -154,8 +160,8 @@ class ReplayPlot:
         start = float(self.times[0])
         onset, impact = self.replay.fall_onset_time, self.replay.fall_impact_time
         if onset is None:
-            return [(start, now, NORMAL_COLOR)]
-        intervals = [(start, min(now, onset), NORMAL_COLOR)]
+            return [(start, now, CLASS_COLORS[int(self.replay.record["label_id"])])]
+        intervals = [(start, min(now, onset), POST_IMPACT_COLOR)]
         if now > onset:
             intervals.append((max(start, onset), min(now, impact), FALL_COLOR))
         if now > impact:
@@ -173,7 +179,7 @@ class ReplayPlot:
         if onset is None:
             return self.class_names[int(self.replay.record["label_id"])]
         if now < onset:
-            return "Precaída / sin caída"
+            return "Precaída · sin etiqueta Static/Dynamic"
         if now < impact:
             return "Caída (preimpacto)"
         if len(self.class_names) == 4:
@@ -223,9 +229,17 @@ class ReplayPlot:
                 probability_times = np.append(probability_times, now)
                 probability_values = np.append(probability_values, p_fall)
             self.probability_line.set_data(probability_times, probability_values)
+            for label, line in self.probability_lines.items():
+                if label == 0:
+                    continue
+                values = np.asarray(self.replay.probabilities[begin:available, label])
+                if len(values) < len(probability_times):
+                    values = np.append(values, values[-1])
+                line.set_data(probability_times, values)
             self.probability_marker.set_data([now], [p_fall])
         else:
-            self.probability_line.set_data([], [])
+            for line in self.probability_lines.values():
+                line.set_data([], [])
             self.probability_marker.set_data([], [])
 
         for collection, intervals, bottom in (
