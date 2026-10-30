@@ -124,6 +124,7 @@ def prepare_replay(
     recording: str | Path | None = None, window: int | None = None,
     subject: str | None = None, device: str | torch.device = "auto",
     prediction_stride: int = 10, batch_size: int | None = None,
+    endpoint_context: int | None = None,
 ) -> ReplayData:
     """Load one test trace and predict trailing windows on a fixed sample grid.
 
@@ -155,7 +156,11 @@ def prepare_replay(
     _validate_source(signal, frames, source, record, file_index, split, encoder)
 
     # This schedule is intentionally independent of the saved fall-window starts.
-    starts = np.arange(0, len(signal) - encoder.raw_win + 1, int(prediction_stride), dtype=np.int64)
+    context = encoder.raw_win if endpoint_context is None else endpoint_context
+    if not isinstance(context, (int, np.integer)) or not encoder.raw_win <= context <= len(signal):
+        raise ValueError("endpoint_context must cover the model window and fit the recording.")
+    starts = np.arange(context - encoder.raw_win, len(signal) - encoder.raw_win + 1,
+                       int(prediction_stride), dtype=np.int64)
     endpoints = starts + encoder.raw_win - 1
     set_seed(cfg.seed)
     model = build_model(cfg, dev)

@@ -673,3 +673,48 @@ This project builds on prior work in spiking neural networks for human activity 
 
 - Li Y, Yin R, Kim Y, Panda P. *Efficient human activity recognition with spatio-temporal spiking neural networks*. Frontiers in Neuroscience, 2023. Code: https://github.com/Intelligent-Computing-Lab-Panda/SNN_HAR
 - Yin R, Moitra A, Bhattacharjee A, Kim Y, Panda P. *SATA: Sparsity-Aware Training Accelerator for Spiking Neural Networks*. IEEE TCAD, 2023. Code: https://github.com/RuokaiYin/SATA_Sim
+
+### Comparar las predicciones de las tres ventanas
+
+`animate_kfall_comparison.py` reproduce una misma grabación de **test** con los
+mejores pesos de tres entrenamientos ya terminados (2.05, 3.30 y 4.10 s):
+
+```bash
+python animate_kfall_comparison.py --run-dirs \
+  runs/kfall_2p05s_200hz_FECHA_HORA \
+  runs/kfall_3p30s_200hz_FECHA_HORA \
+  runs/kfall_4p10s_200hz_FECHA_HORA \
+  --device auto
+```
+
+Reemplaza cada ruta por el directorio real mostrado como `saved_run` al entrenar;
+contiene `checkpoints/best_model.pt`. También admite los directorios anidados
+producidos por `compare_kfall_windows.py`. No vuelve a entrenar los modelos.
+
+Cada columna muestra XYZ, P(Fall), predicción y etiqueta temporal real. El texto
+superior distingue Dynamic y Static; la banda verde agrupa ambas como «sin caída».
+Las decisiones comparten extremos cada 10 muestras originales (0.10 s), a partir
+de la muestra 410 (4.09 s desde la primera muestra). Se mantiene el último
+resultado hasta la siguiente decisión; antes del contexto común no hay predicción.
+La inferencia se calcula al abrir la interfaz, sin usar muestras futuras ni las
+anotaciones para elegir los instantes de decisión. Esta reproducción continua
+incluye extremos distintos de las ventanas de evaluación offline y no sustituye
+sus métricas. Las anotaciones de caída no distinguen Static/Dynamic antes del
+inicio ni después del intervalo postimpacto.
+
+Controles: reproducción/pausa, velocidad, deslizador temporal, decisión anterior o
+siguiente, acelerómetro/giroscopio. Espacio pausa y las flechas recorren decisiones.
+Usa `--recording SA07T20R01.csv` para escoger otra grabación presente en el test de
+los tres modelos, o `--subject SA07` para filtrar por sujeto. La selección inicial
+es una caída apta para la ventana más larga. `--dataset-root data/KFall` permite
+reubicar los CSV. Se requieren las cachés de los entrenamientos y los datos fuente.
+
+Exportar sin escritorio:
+
+```bash
+python animate_kfall_comparison.py --run-dirs RUTA_2P05 RUTA_3P30 RUTA_4P10 \
+  --time 5 --save-frame results/comparativa_predicciones.png
+```
+
+También admite `--save-gif results/comparativa.gif`, `--paused`,
+`--prediction-stride 10` y `--view-seconds 6`.
