@@ -17,7 +17,8 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from preprocess.event_encoding import sigma_delta
-from preprocess.kfall_labels import class_names, event_steps_for_samples, window_samples
+from preprocess.kfall_labels import (class_names, event_steps_for_samples, window_samples,
+                                     LABEL_POLICY_DEFAULTS, label_policy_kwargs)
 from preprocess.utils import class_counts, json_ready, load_json, save_json_atomic, subject_split_indices
 
 from preprocess.interpolate_signal import derive_output_length, interpolate_signal, interpolate_to_times, make_resample_plan
@@ -162,6 +163,13 @@ class RunConfig:
     post_impact_seconds: float = 0.0
     endpoint_context: int | None = None
     resample_hz: float | None = None
+    label_policy: str = "legacy"
+    adl_margin_seconds: float = 1.5
+    pre_fall_seconds: float = 1.2
+    post_recovery_seconds: float = 2.0
+    motion_window_seconds: float = .25
+    motion_acc_threshold: float = .08
+    motion_gyr_threshold: float = 10.
 
     @classmethod
     def from_args(cls, args: Any) -> "RunConfig":
@@ -242,6 +250,7 @@ class RunConfig:
             post_impact_seconds=post_impact_seconds,
             endpoint_context=endpoint_context,
             resample_hz=None if resample_hz is None else float(resample_hz),
+            **(label_policy_kwargs(args) if dataset == "kfall" else LABEL_POLICY_DEFAULTS),
         )
         if dataset == "kfall":
             from loaders.kfall_event_loader import KFallEventLoaderConfig
@@ -250,7 +259,8 @@ class RunConfig:
                                    stride=config.window_stride, fall_policy=config.fall_policy,
                                    post_impact_seconds=config.post_impact_seconds,
                                    endpoint_context=config.endpoint_context,
-                                   resample_hz=config.resample_hz)
+                                   resample_hz=config.resample_hz,
+                                   **label_policy_kwargs(config))
         return config
 
     @property
@@ -287,6 +297,8 @@ class RunConfig:
             tag += f"_win{self.raw_win}_te{self.out_len}_post{safe_tag(self.post_impact_seconds)}_ctx{context}_stride{self.window_stride}"
             if self.resample_hz is not None:
                 tag += f"_resample{safe_tag(self.resample_hz)}hz"
+            from train_kfall import label_cache_tag
+            tag += label_cache_tag(vars(self))
         return self.results_root / tag
 
 
@@ -491,7 +503,8 @@ def prepare_kfall(cfg: RunConfig, logger: logging.Logger) -> PreparedData:
                                        stride=cfg.window_stride or 102, fall_policy=cfg.fall_policy,
                                        post_impact_seconds=cfg.post_impact_seconds,
                                        endpoint_context=cfg.endpoint_context,
-                                       resample_hz=cfg.resample_hz)
+                                       resample_hz=cfg.resample_hz,
+                                       **label_policy_kwargs(cfg))
     indices = subject_split_indices([record["subject"] for record in records], cfg.split, cfg.seed)
     window_refs: dict[str, list[tuple[int, int]]] = {}
     window_labels: dict[str, np.ndarray] = {}
@@ -529,6 +542,7 @@ def prepare_kfall(cfg: RunConfig, logger: logging.Logger) -> PreparedData:
         "raw_win": cfg.raw_win, "out_len": cfg.out_len,
         "window_seconds": cfg.raw_win / 100.0,
         "post_impact_seconds": cfg.post_impact_seconds,
+        **(label_policy_kwargs(cfg) if cfg.label_policy != "legacy" else {}),
         "endpoint_context": cfg.endpoint_context,
         "n_classes": len(cfg.label_names), "class_names": list(cfg.label_names.values()),
         "recordings": len(records), "skipped": skipped,
@@ -894,8 +908,12 @@ class ThetaOptimizer:
         if cfg.resample_hz is None:
             signature["config"].pop("resample_hz", None)
         if cfg.dataset != "kfall":
-            for key in ("window_seconds", "post_impact_seconds", "endpoint_context"):
+            for key in ("window_seconds", "post_impact_seconds", "endpoint_context", *LABEL_POLICY_DEFAULTS):
                 signature["config"].pop(key, None)
+        elif cfg.label_policy == "legacy":
+            for key, default in LABEL_POLICY_DEFAULTS.items():
+                if signature["config"].get(key) == default:
+                    signature["config"].pop(key, None)
         self.experiment_signature = hashlib.sha256(json.dumps(signature, sort_keys=True).encode("utf-8")).hexdigest()
 
         _worker_init(self._splits_with_chunks(), data.t_native, data.t_interp, data.label_names, cfg.sd_init, cfg.interp_method)

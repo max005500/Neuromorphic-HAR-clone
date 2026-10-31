@@ -107,7 +107,7 @@ class ResampledCheckpointIntegrationTests(unittest.TestCase):
 
 class ResampledComparisonIntegrationTests(unittest.TestCase):
     def test_training_auto_names_include_encoding_identity_and_honor_explicit_names(self):
-        baseline = training_args(["--post-impact-seconds", "0"])
+        baseline = training_args(["--post-impact-seconds", "0", "--label-policy", "legacy"])
         self.assertEqual(baseline.cache_name, "default")
         first_values = [.05, .05, .05, 5., 5., 5.]
         second_values = [.15, .15, .15, 15., 15., 15.]

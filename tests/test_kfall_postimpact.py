@@ -88,7 +88,7 @@ class DurationAndBatchTests(unittest.TestCase):
         self.assertEqual(class_names(4)[3], "Postimpact")
 
     def test_legacy_cli_can_use_original_three_class_cache(self):
-        cfg = get_args(["--post-impact-seconds", "0"])
+        cfg = get_args(["--post-impact-seconds", "0", "--label-policy", "legacy"])
         self.assertEqual(cfg.n_classes, 3)
         self.assertEqual(cfg.cache_name, "default")
 

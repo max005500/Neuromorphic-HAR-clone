@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events, window_targets_for_record
-from preprocess.kfall_labels import class_names
+from preprocess.kfall_labels import class_names, record_frame_labels, label_policy_kwargs, record_frames
 from preprocess.interpolate_signal import interpolate_to_times
 from preprocess.kfall_resampling import resample_kfall_signal
 from preprocess.preprocess_kfall import load_record
@@ -52,6 +52,7 @@ class WindowData:
     resample_hz: float | None = None
     analog: np.ndarray | None = None
     time_analog: np.ndarray | None = None
+    frame_labels: np.ndarray | None = None
 
 
 @lru_cache(maxsize=8)
@@ -61,6 +62,24 @@ def _read_record(path: str, mtime_ns: int, size: int):
     signal.setflags(write=False)
     frames.setflags(write=False)
     return signal, frames, metadata
+
+
+def source_frame_labels(signal, frames, record, config):
+    """Recompute new truth labels and reject an altered temporal manifest."""
+    kwargs = label_policy_kwargs(config)
+    for name, default in (("post_impact_seconds", 0.), ("sample_rate_hz", 100.), ("fall_policy", "pre_impact")):
+        kwargs[name] = config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
+    if kwargs["label_policy"] == "legacy":
+        return None
+    if "frame_runs" in record and not np.array_equal(frames, record_frames(record)):
+        raise ValueError("Original FrameCounter grid differs from the saved temporal label manifest.")
+    labels = record_frame_labels(frames, record, signal=signal, **kwargs)
+    if "frame_label_intervals" in record:
+        saved = record_frame_labels(frames, record, **kwargs)
+        if not np.array_equal(labels, saved):
+            raise ValueError("Original signal or temporal labels differ from the saved label manifest.")
+    labels.setflags(write=False)
+    return labels
 
 
 class KFallWindowStore:
@@ -185,6 +204,8 @@ class KFallWindowStore:
         if start < 0 or stop > len(signal):
             raise ValueError(f"Cached window {split}[{index}] is outside source CSV {path.name}.")
         raw, frames = signal[start:stop], all_frames[start:stop]
+        labels = source_frame_labels(signal, all_frames, record, self.cfg)
+        frame_labels = None if labels is None else labels[start:stop]
         starts, targets = window_targets_for_record(signal, {**record, "frames": all_frames}, self.cfg)
         positions = np.flatnonzero(starts == start)
         if len(positions) != 1 or int(targets[int(positions[0])]) != class_id:
@@ -241,4 +262,5 @@ class KFallWindowStore:
             class_id=class_id, label=self.class_names[class_id], fall_onset_time=onset_time,
             fall_impact_time=impact_time, theta=theta, post_impact_end_time=post_end_time,
             resample_hz=self.cfg.resample_hz, analog=analog, time_analog=analog_times,
+            frame_labels=frame_labels,
         )

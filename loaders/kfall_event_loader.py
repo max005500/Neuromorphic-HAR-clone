@@ -23,7 +23,8 @@ from preprocess.interpolate_signal import interpolate_to_times
 from preprocess.kfall_resampling import resample_kfall_signal, validate_resample_hz
 from preprocess.preprocess_kfall import load_kfall_3class
 from preprocess.utils import subject_split_indices
-from preprocess.kfall_labels import class_names
+from preprocess.kfall_labels import (class_names, label_policy_kwargs, record_frame_labels,
+                                     record_frames, label_manifest, LABEL_POLICY_DEFAULTS)
 
 SPLIT_NAMES = ("train", "val", "test")
 ARRAY_KEYS = (
@@ -53,6 +54,13 @@ class KFallEventLoaderConfig:
     post_impact_seconds: float = 0.0
     endpoint_context: int | None = None
     resample_hz: float | None = None
+    label_policy: str = "legacy"
+    adl_margin_seconds: float = 1.5
+    pre_fall_seconds: float = 1.2
+    post_recovery_seconds: float = 2.0
+    motion_window_seconds: float = 0.25
+    motion_acc_threshold: float = 0.08
+    motion_gyr_threshold: float = 10.0
 
     def __post_init__(self) -> None:
         if self.raw_win < 2 or self.out_win < 2 or self.stride < 1:
@@ -65,6 +73,17 @@ class KFallEventLoaderConfig:
         if not np.isfinite(self.sample_rate_hz) or self.sample_rate_hz != 100.0:
             raise ValueError("KFall frame annotations use a 100 Hz sample rate.")
         validate_resample_hz(self.resample_hz, self.sample_rate_hz)
+        if self.label_policy not in {"legacy", "temporal", "motion"}:
+            raise ValueError("label_policy must be legacy, temporal or motion.")
+        for key in ("adl_margin_seconds", "pre_fall_seconds", "post_recovery_seconds", "motion_window_seconds"):
+            value = getattr(self, key) * self.sample_rate_hz
+            if not np.isfinite(value) or value < 0 or not np.isclose(value, round(value), rtol=0, atol=1e-8):
+                raise ValueError(f"{key} must be non-negative and represent whole native samples.")
+        if self.motion_window_seconds <= 0:
+            raise ValueError("motion_window_seconds must be positive.")
+        for key in ("motion_acc_threshold", "motion_gyr_threshold"):
+            if not np.isfinite(getattr(self, key)) or getattr(self, key) <= 0:
+                raise ValueError(f"{key} must be finite and positive.")
         if not np.isfinite(self.dead_zone) or self.dead_zone < 0:
             raise ValueError("dead_zone must be finite and non-negative.")
         if self.sd_init not in {"x0", "zero"}:
@@ -99,8 +118,23 @@ def window_targets_for_record(
     if length < context:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
     ends = np.arange(context - 1, length, cfg.stride, dtype=np.int64)
-    if int(meta["label_id"]) != 0:
+    if int(meta["label_id"]) != 0 and cfg.label_policy == "legacy":
         return ends - cfg.raw_win + 1, np.full(len(ends), int(meta["label_id"]), dtype=np.int64)
+
+    if cfg.label_policy != "legacy":
+        frames = record_frames(meta)
+        # Saved intervals support evaluation without loading source CSVs.
+        signal = record if record.shape == (length, 6) and "frame_label_intervals" not in meta else None
+        targets = record_frame_labels(frames, meta, signal=signal,
+            post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
+            fall_policy=cfg.fall_policy, **label_policy_kwargs(cfg))
+        if int(meta["label_id"]) == 0:
+            for label in (0, 3):
+                eligible = np.flatnonzero(targets == label)
+                if len(eligible) and eligible[-1] >= context - 1:
+                    ends = np.append(ends, eligible[-1])
+        ends = np.unique(ends)
+        return ends - cfg.raw_win + 1, targets[ends]
 
     onset = int(meta["onset_idx"])
     impact = int(meta["impact_idx"])
@@ -285,12 +319,16 @@ def load_or_build_kfall_event_splits(
     if not run_name or Path(run_name).name != run_name or run_name in {".", ".."}:
         raise ValueError("run_name must be a simple cache name.")
     expected = {
-        "version": 3 if cfg.resample_hz is not None else
+        "version": 4 if label_policy_kwargs(cfg) != LABEL_POLICY_DEFAULTS else 3 if cfg.resample_hz is not None else
                    2 if cfg.post_impact_seconds > 0 or cfg.endpoint_context is not None else 1,
         "dataset": "kfall", "split_strategy": "subject",
         "dataset_root": str(root.resolve()), "label_dir": str(labels_root.resolve()),
         "config": asdict(cfg), "source_signature": _source_signature(root, labels_root),
     }
+    if label_policy_kwargs(cfg) == LABEL_POLICY_DEFAULTS:
+        # Adding label policies must not invalidate existing model/cache snapshots.
+        for key in LABEL_POLICY_DEFAULTS:
+            expected["config"].pop(key)
     if cfg.resample_hz is None:
         # Adding an opt-in stage must not invalidate already encoded caches.
         expected["config"].pop("resample_hz")
@@ -306,6 +344,12 @@ def load_or_build_kfall_event_splits(
         return load_event_splits(output, mmap_mode, verbose), u.load_json(output / "metadata.json")
 
     recordings, labels, records, skipped = load_kfall_3class(root, label_dir=labels_root)
+    if cfg.label_policy != "legacy":
+        for signal, record in zip(recordings, records):
+            targets = record_frame_labels(record["frames"], record, signal=signal,
+                post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
+                fall_policy=cfg.fall_policy, **label_policy_kwargs(cfg))
+            record.update(label_manifest(record["frames"], targets))
     if cfg.post_impact_seconds > 0:
         for record in records:
             if record["label_id"] == 0:
@@ -336,6 +380,14 @@ def load_or_build_kfall_event_splits(
             "native_hz": cfg.sample_rate_hz, "target_hz": cfg.resample_hz,
             "method": "linear", "grid": "observed endpoints only; no extrapolation",
             "event_steps": cfg.out_win,
+        }
+    if cfg.label_policy != "legacy":
+        metadata["temporal_labeling"] = {
+            **label_policy_kwargs(cfg), "priority": ["Fall", "Postimpact", "Dynamic", "Static"],
+            "adl_rule": "Dynamic on [first_frame + margin, last_frame + 1 - margin); otherwise Static",
+            "fall_rule": "Dynamic before onset and after postimpact; all other unprotected frames Static",
+            "motion_rule": "Optional trailing per-axis ranges replace Dynamic/Static only; fixed heuristic thresholds",
+            "native_sample_rate_hz": cfg.sample_rate_hz,
         }
     if expected["version"] >= 2:
         names = class_names(4 if cfg.post_impact_seconds > 0 else 3)

@@ -16,7 +16,7 @@ from preprocess.preprocess_kfall import FILE_RE, load_record
 from preprocess.kfall_labels import class_names
 from train.utils import extract_single_logits, make_autocast, set_seed
 from train_kfall import build_model
-from visualization.kfall_data import KFallWindowStore
+from visualization.kfall_data import KFallWindowStore, source_frame_labels
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,7 @@ class ReplayData:
     label: str
     post_impact_seconds: float = 0.0
     post_impact_end_time: float | None = None
+    true_labels: np.ndarray | None = None
 
 
 def prediction_index_at(replay: ReplayData, time: float) -> int | None:
@@ -154,6 +155,12 @@ def prepare_replay(
     path = store._record_path(record)
     signal, frames, source = load_record(path)
     _validate_source(signal, frames, source, record, file_index, split, encoder)
+    true_labels = source_frame_labels(signal, frames, record, encoder)
+    if true_labels is not None:
+        selected = np.flatnonzero(split["file_idx"] == file_index)
+        rows = split["start"][selected] + encoder.raw_win - 1
+        if not np.array_equal(true_labels[rows], split["y_h1"][selected]):
+            raise ValueError("Cached test targets differ from the saved temporal label policy.")
 
     # This schedule is intentionally independent of the saved fall-window starts.
     context = encoder.raw_win if endpoint_context is None else endpoint_context
@@ -208,4 +215,5 @@ def prepare_replay(
         subject=record["subject"], label=class_names(cfg.n_classes)[int(record["label_id"])],
         post_impact_seconds=float(getattr(encoder, "post_impact_seconds", 0.0)),
         post_impact_end_time=post_end_time,
+        true_labels=true_labels,
     )

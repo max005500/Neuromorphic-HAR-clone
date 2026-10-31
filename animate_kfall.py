@@ -47,7 +47,8 @@ class KFallReplayPlayer:
         self.truth_text = self.figure.text(0.085, 0.892, "", fontsize=12)
         self.time_text = self.figure.text(0.085, 0.855, "", fontsize=9, color="#475569")
         self.figure.text(0.085, 0.008,
-                         "Reproducción de inferencias por ventanas: cada decisión se muestra al terminar su entrada y se mantiene hasta la siguiente.",
+                         "Reproducción de inferencias por ventanas: cada decisión se muestra al terminar su entrada y se mantiene hasta la siguiente. "
+                         f"Etiquetado guardado: {replay.config.get('label_policy', 'legacy')}.",
                          fontsize=8, color="#475569")
         try:
             self.plot = ReplayPlot(self.axes, replay, sensor=sensor, view_seconds=view_seconds)

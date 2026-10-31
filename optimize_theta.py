@@ -97,10 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Fall-dataset window extraction. Ignored by already-windowed datasets.
     p.add_argument("--window-stride", type=int, default=None)
     p.add_argument("--window-seconds", type=float, default=None, help="KFall input duration at 100 Hz; defaults to 2.05 s.")
-    p.add_argument("--post-impact-seconds", type=float, default=None, help="KFall Postimpact label duration; defaults to 1.20 s. Use 0 for legacy three classes.")
+    p.add_argument("--post-impact-seconds", type=float, default=None, help="KFall Postimpact label duration; defaults to 1.20 s. Use 0 to disable Postimpact, plus --label-policy legacy for the original task.")
     p.add_argument("--endpoint-context", type=int, default=None, help="KFall shared endpoint context in raw samples, e.g. 410 for duration comparisons.")
     p.add_argument("--fall-policy", choices=("contain_peak", "all", "pre_impact", "annotated_interval"), default=None, help="Default: pre_impact for KFall, contain_peak for SisFall.")
     p.add_argument("--acc-sensor", choices=("ADXL345", "MMA8451Q"), default="ADXL345")
+    from train_kfall import add_label_arguments
+    add_label_arguments(p)
 
     # UCI HAR preprocessing options.
     p.add_argument("--case", default="official", choices=("official", "subject_split", "random", "subject", "subject_large"))

@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from loaders.kfall_event_loader import KFallEventLoaderConfig, window_targets_for_record
-from preprocess.kfall_labels import class_names, label_at_frame
+from preprocess.kfall_labels import class_names, label_at_frame, LABEL_POLICY_DEFAULTS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,9 @@ CHECKPOINT_DATA_KEYS = {
     "resample_hz": "resample_hz",
 }
 OPTIONAL_DATA_DEFAULTS = {"post_impact_seconds": 0.0, "endpoint_context": None, "resample_hz": None}
+LABEL_DATA_DEFAULTS = LABEL_POLICY_DEFAULTS
+OPTIONAL_DATA_DEFAULTS.update(LABEL_DATA_DEFAULTS)
+CHECKPOINT_DATA_KEYS.update({key: key for key in LABEL_DATA_DEFAULTS})
 
 
 def _read_metadata(path: Path) -> dict[str, Any]:
@@ -141,6 +144,9 @@ def load_evaluation_data(
     if _normalized(config) != _normalized(_data_config(cache_metadata)):
         raise ValueError("Event cache preprocessing config differs from the training run.")
     for saved_key, data_key in CHECKPOINT_DATA_KEYS.items():
+        # Legacy task-level targets never used a pre-fall Dynamic interval.
+        if saved_key == "pre_fall_seconds" and config.get("label_policy") == "legacy":
+            continue
         if (saved_key not in checkpoint_config and saved_key not in OPTIONAL_DATA_DEFAULTS) or data_key not in config:
             raise ValueError(f"Missing checkpoint/preprocessing setting: {saved_key}.")
         saved_value = checkpoint_config.get(saved_key, OPTIONAL_DATA_DEFAULTS.get(saved_key))
@@ -222,11 +228,25 @@ def load_evaluation_data(
         mask = arrays["file_idx"] == index
         if not np.all(arrays["subject"][mask] == record["subject"]):
             raise ValueError("Test window subject/activity labels disagree with their source recording.")
-        if int(record["label_id"]) == 0:
-            endpoints = arrays["end_frame"][mask]
+        endpoints = arrays["end_frame"][mask]
+        if cfg.label_policy != "legacy":
+            from preprocess.kfall_labels import record_frames
+
+            frames = record_frames(record)
+            expected_frames = frames[arrays["start"][mask] + cfg.raw_win - 1]
+            if not np.array_equal(endpoints, expected_frames):
+                raise ValueError("Test endpoint frames disagree with the saved source frame grid.")
             expected_labels = [label_at_frame(int(frame), record,
                 post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
-                fall_policy=cfg.fall_policy) for frame in endpoints]
+                fall_policy=cfg.fall_policy,
+                **{key: getattr(cfg, key) for key in LABEL_DATA_DEFAULTS}) for frame in endpoints]
+            if not np.array_equal(expected_labels, arrays["y_h1"][mask]):
+                raise ValueError("Test labels violate the saved Dynamic/Static temporal policy.")
+        if int(record["label_id"]) == 0:
+            expected_labels = [label_at_frame(int(frame), record,
+                post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
+                fall_policy=cfg.fall_policy,
+                **{key: getattr(cfg, key) for key in LABEL_DATA_DEFAULTS}) for frame in endpoints]
             valid = np.array([label is not None and label == target
                               for label, target in zip(expected_labels, arrays["y_h1"][mask])])
             impact = int(record["fall_impact_frame"])
@@ -234,7 +254,7 @@ def load_evaluation_data(
             if not valid.all() or not np.allclose(arrays["lead_time_ms"][mask], lead):
                 raise ValueError("Test fall windows violate their annotated temporal policy.")
         else:
-            if not np.all(arrays["y_h1"][mask] == record["label_id"]):
+            if cfg.label_policy == "legacy" and not np.all(arrays["y_h1"][mask] == record["label_id"]):
                 raise ValueError("Test window subject/activity labels disagree with their source recording.")
             if not np.isnan(arrays["lead_time_ms"][mask]).all():
                 raise ValueError("Non-fall test windows must not have an annotated impact lead time.")

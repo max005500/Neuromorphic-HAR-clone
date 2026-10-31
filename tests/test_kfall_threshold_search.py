@@ -121,6 +121,7 @@ class ThresholdSearchTests(unittest.TestCase):
             "--dataset-root", str(directory / "raw"), "--cache-dir", str(directory / "cache"),
             "--out-dir", str(directory / "runs"), "--results-dir", str(directory / "results"),
             "--epochs", "2", "--train-per-class", "1",
+            "--label-policy", "legacy",
         ])
         candidate = build_candidates()[0]
         config = vars(get_args(training_command(args, candidate)[2:]))

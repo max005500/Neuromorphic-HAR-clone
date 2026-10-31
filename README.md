@@ -64,30 +64,93 @@ Download the sensor data and temporal labels from the [official KFall site](http
 
 Native filenames such as `S06T20R01.csv` and the documented form `SA06T20R01.csv` are both accepted. The loader reads `AccX`, `AccY`, `AccZ`, `GyrX`, `GyrY`, and `GyrZ` as floating-point values in **g** and **degrees per second**. It ignores Euler angles. It matches recordings to each subject's task/trial annotations and resolves `Fall_onset_frame` and `Fall_impact_frame` against the CSV's `FrameCounter`; frame numbers are not assumed to be row offsets. Missing, duplicate, or inconsistent fall annotations raise an error.
 
-The activity families follow the repository's SisFall grouping: `Static` includes stable postures and posture changes. Static task IDs are `1, 2, 3, 5, 11–19`; dynamic IDs are `4, 6–10, 35, 36`; fall trials have IDs `20–34`. This grouping and the post-impact class are adaptations for the model, not native KFall activity labels.
+New KFall training runs use `--label-policy temporal`. The original XLSX fall
+annotations are preserved; the additional Dynamic/Static targets are rules of
+this experiment, not extra annotations supplied by KFall. All durations below
+use native `FrameCounter` time at 100 Hz, independently of interpolation.
 
-Each window is labelled by its **last observed sample**. The default four-class task uses:
+Each input window is labelled by its **last observed sample**. Temporal labels
+are assigned to the recording before selecting input windows:
 
 | ID | Class | Target at the window endpoint |
 |---|---|---|
 | 0 | `Fall` | `onset <= frame < impact` |
-| 1 | `Dynamic` | Dynamic ADL task family |
-| 2 | `Static` | Static/posture ADL task family |
+| 1 | `Dynamic` | ADL interior or pre-fall/recovery intervals described below |
+| 2 | `Static` | All remaining observed samples |
 | 3 | `Postimpact` | `impact <= frame < impact + 120` at 100 Hz |
 
-`Postimpact` lasts 1.20 seconds from the annotated impact, including the impact
-sample and excluding the end boundary. A post-impact input window can also
-contain earlier falling motion; the endpoint determines its target. Pre-onset
-parts of fall trials and samples after the post-impact interval have no inferred
-ADL class and are excluded from this window-label protocol. Short recordings
-are clipped to their available samples; no future data or padding is added.
+For **recordings without a fall**, Dynamic starts 1.50 seconds after the first
+sample and stops 1.50 seconds before the recording's end. The initial and final
+margins are Static. Recording coverage is `[first_frame, last_frame + 1)`; both
+margins contain 150 native frame positions. If the recording is too short for a
+nonempty interior, it remains entirely Static. The old ADL task family does not
+determine these new temporal labels.
+
+For **fall recordings**, Dynamic occupies the 1.20 seconds immediately before
+fall onset, and the 2.00 seconds immediately **after the end of Postimpact**.
+Fall and Postimpact always retain their own classes. Remaining samples are
+Static. Intervals include their start and exclude their end; all intervals are
+clipped to available observations without padding or extending a recording.
+`--adl-margin-seconds`, `--pre-fall-seconds`, and `--post-recovery-seconds` change
+these three durations; `--post-impact-seconds` changes the default 1.20-second
+Postimpact interval.
+
+The optional `--label-policy motion` instead derives Dynamic/Static from trailing
+sensor variation outside the protected Fall/Postimpact intervals. It uses a
+0.25-second lookback and marks movement when any accelerometer axis range reaches
+0.08 g or any gyroscope axis range reaches 10 degrees/s. Configure these with
+`--motion-window-seconds`, `--motion-acc-threshold`, and `--motion-gyr-threshold`.
+These are explicit heuristic thresholds, distinct from Sigma-Delta `--theta`;
+they are not calibrated ground truth or a reported optimum. Low-variation
+samples are Static. Temporal mode remains the reproducible default and does not
+infer additional motion labels from sensor variation.
+
+`--label-policy legacy` reproduces the earlier task-family protocol: static task
+IDs `1, 2, 3, 5, 11–19`, dynamic IDs `4, 6–10, 35, 36`, and fall task IDs
+`20–34`. In that protocol, pre-onset samples in fall recordings and samples after
+Postimpact have no ADL target and are excluded. Existing checkpoints and caches
+without a saved `label_policy` retain this legacy interpretation.
+
+Changing the label policy requires a newly generated dataset and a new training
+run. New label settings are part of cache identity; old runs keep their saved
+labels and cannot be used as evaluation results for the updated targets. The
+source CSVs and XLSX annotation workbooks are never rewritten.
+
+Generate and train **one-second windows with the updated temporal labels**:
+
+```bash
+# Prepare the dataset only; no optimization or model training.
+python train_kfall.py --preprocess-only \
+  --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
+  --theta-file configs/kfall_theta_200hz.json \
+  --label-policy temporal --adl-margin-seconds 1.50 \
+  --pre-fall-seconds 1.20 --post-recovery-seconds 2.00 \
+  --post-impact-seconds 1.20 --workers 0
+
+# Build/reuse the same cache and train a new four-class SNN.
+python train_kfall.py \
+  --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
+  --theta-file configs/kfall_theta_200hz.json \
+  --label-policy temporal --adl-margin-seconds 1.50 \
+  --pre-fall-seconds 1.20 --post-recovery-seconds 2.00 \
+  --post-impact-seconds 1.20 \
+  --epochs 100 --batch-size 32 --workers 0 --device auto \
+  --run kfall_1p00s_200hz_temporal
+```
+
+`--endpoint-context 410` retains the shared comparison context used by longer
+models. Use `--endpoint-context 100` for natural one-second coverage, including
+short recordings with at least 100 samples. Train the other durations again with
+the same temporal policy before comparing their results under the new labels.
+Subject separation is unchanged and happens before windows are generated.
 
 The default context uses 205 samples at 100 Hz, stride 102, and 2048 event steps.
-`--window-seconds` selects a longer context, preserving approximately the same
+`--window-seconds` selects a different context, preserving approximately the same
 encoder time scale by default:
 
 | Nominal context | Raw samples | Event steps | Event channels | Offsets |
 |---|---|---|---|---|
+| 1.00 s | 100 | 999 | 12 | 6 |
 | 2.05 s | 205 | 2048 | 12 | 6 |
 | 3.30 s | 330 | 3297 | 12 | 6 |
 | 4.10 s | 410 | 4096 | 12 | 6 |
@@ -97,8 +160,9 @@ information. Nominal durations count samples; first-to-last sample spans are
 one sampling interval shorter (e.g. 2.04 s for 205 samples at 100 Hz).
 
 Fall windows exclude the impact sample. Postimpact windows receive class 3.
-`--post-impact-seconds` changes the post-impact interval; `0` restores the legacy
-three-class task and its original cache naming. The optional
+`--post-impact-seconds` changes the post-impact interval. Use
+`--label-policy legacy --post-impact-seconds 0` to restore the original
+three-class protocol and cache naming. The optional
 `--fall-policy annotated_interval` is available only with post-impact disabled,
 because assigning the impact to both classes would be ambiguous.
 
@@ -210,7 +274,7 @@ python optimize_theta.py --dataset kfall --data-root data --ups 10 --dead-zone 0
 
 For KFall, UPS 10 scales the original 205-to-2048 ratio to the selected duration;
 `--out-len` overrides it. Keep window duration, post-impact interval, endpoint
-context, stride, subject split, and encoding settings consistent when transferring
+context, stride, subject split, label policy, and encoding settings consistent when transferring
 the resulting six values to `train_kfall.py --theta ...`. Optimization uses
 training/validation subjects for selection and reports test reconstruction error
 afterward. Use `--post-impact-seconds 0` for the legacy protocol.
@@ -260,7 +324,8 @@ python compare_kfall_windows.py --mode preprocess \
 Use `--mode train --epochs 3 --batch-size 32 --device cpu` with the same settings
 to train the three variants. The preset was calibrated on 2.05-second windows;
 applying the same thresholds to all durations keeps that variable fixed for
-the window comparison. Supply the values directly with
+the window comparison. Its calibration used the legacy label policy, so it is a
+starting preset, not a validated optimum for the new temporal targets. Supply the values directly with
 `--theta 0.025 0.025 0.025 1.25 1.25 1.25` if a JSON file is inconvenient.
 
 Refine around a previous winner, or start from an `optimize_theta.py` result,
@@ -418,9 +483,11 @@ pre-impact window; 3.30 seconds leaves 35, and 2.05 seconds leaves none. These
 counts describe recordings, not window-level recall. `--endpoint-policy natural`
 retains each duration's available examples, but then the evaluated examples differ.
 
-With matched endpoints and the supplied dataset, every variant has 15,559 train,
+For the **legacy** label policy and supplied dataset, matched variants had 15,559 train,
 1,735 validation, and 1,856 test windows. Test targets are Fall 191, Dynamic 591,
-Static 667, and Postimpact 407, across the same 26/3/3 subjects.
+Static 667, and Postimpact 407, across the same 26/3/3 subjects. These historical
+counts do not apply to the new temporal targets, which also include previously
+unlabelled parts of fall recordings.
 
 `--event-length-policy scaled` uses the event lengths in the table above. The
 optional `fixed` policy keeps `--fixed-out-win 2048` for all durations; that also
@@ -569,13 +636,11 @@ and is held until the next one. Before a complete input window is available,
 the model is shown as having no prediction. The displayed samples and decisions
 never extend beyond the playback cursor.
 
-Ground truth distinguishes the annotated onset-to-impact falling interval from
-the post-impact period. Post-impact is shown separately because the normal
-activity class there is not temporally annotated. The model's binary fall
-indicator uses the argmax of its saved output classes, and the probability panel
-shows softmax `P(Fall)`. Four-class runs display Postimpact separately for the
-configured 1.20-second interval, then show that the remaining time is unlabelled.
-Legacy three-class runs keep their original post-impact display.
+The player uses the label policy saved by each training run. Temporal runs show
+the new Dynamic/Static intervals, including recovery after Postimpact; legacy
+runs keep unannotated fall-trial phases grey. The prediction band uses the argmax
+of the saved output classes; the probability panel shows the softmax probability
+of every class. Legacy three-class runs keep their original post-impact display.
 
 Predictions are computed before playback for this visualization. Playback speed
 does not measure inference latency, and this demonstration is separate from
@@ -694,15 +759,16 @@ producidos por `compare_kfall_windows.py`. No vuelve a entrenar los modelos.
 Cada columna muestra XYZ, las probabilidades de las cuatro clases, predicción y
 etiqueta temporal real. Los colores distinguen Caída (rojo), Dinámico (azul),
 Estático (verde) y Postimpacto (naranja). Gris indica ausencia de predicción o de
-etiqueta temporal; antes del inicio de una caída no se inventa Static/Dynamic.
+etiqueta temporal. Los modelos anteriores conservan las etiquetas legacy; los
+nuevos muestran los intervalos dinámicos/estáticos de su política guardada.
 Las decisiones comparten extremos cada 10 muestras originales (0.10 s), a partir
 de la muestra 410 (4.09 s desde la primera muestra). Se mantiene el último
 resultado hasta la siguiente decisión; antes del contexto común no hay predicción.
 La inferencia se calcula al abrir la interfaz, sin usar muestras futuras ni las
 anotaciones para elegir los instantes de decisión. Esta reproducción continua
 incluye extremos distintos de las ventanas de evaluación offline y no sustituye
-sus métricas. Las anotaciones de caída no distinguen Static/Dynamic antes del
-inicio ni después del intervalo postimpacto.
+sus métricas. Las etiquetas Dynamic/Static de los modelos nuevos son reglas del
+experimento; no son nuevas anotaciones manuales del dataset.
 
 Controles: reproducción/pausa, velocidad, deslizador temporal, decisión anterior o
 siguiente, acelerómetro/giroscopio. Espacio pausa y las flechas recorren decisiones.

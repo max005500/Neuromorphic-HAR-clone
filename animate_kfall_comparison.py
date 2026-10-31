@@ -43,12 +43,17 @@ def validate_comparison(replays):
         for key in ("subject", "code", "trial", "fall_onset_frame", "fall_impact_frame"):
             if replay.record.get(key) != reference.record.get(key):
                 raise ValueError("Los modelos no comparten la misma grabación o anotaciones.")
-        for key in ("split", "seed", "post_impact_seconds", "n_classes"):
-            if replay.config.get(key) != reference.config.get(key):
+        defaults = {"label_policy": "legacy", "adl_margin_seconds": 1.5, "pre_fall_seconds": 1.2,
+                    "post_recovery_seconds": 2., "motion_window_seconds": .25,
+                    "motion_acc_threshold": .08, "motion_gyr_threshold": 10.}
+        for key in ("split", "seed", "post_impact_seconds", "n_classes", *defaults):
+            if replay.config.get(key, defaults.get(key)) != reference.config.get(key, defaults.get(key)):
                 raise ValueError(f"Configuración incompatible entre modelos: {key}.")
         for name in ("times", "frames", "raw", "endpoint_rows", "endpoint_times"):
             if not np.array_equal(getattr(replay, name), getattr(reference, name)):
                 raise ValueError(f"Las señales y decisiones deben estar sincronizadas: {name}.")
+        if not np.array_equal(getattr(replay, "true_labels", None), getattr(reference, "true_labels", None)):
+            raise ValueError("Los modelos deben compartir las etiquetas temporales reales.")
 
 
 class KFallComparisonPlayer(KFallReplayPlayer):
@@ -69,7 +74,8 @@ class KFallComparisonPlayer(KFallReplayPlayer):
         self.figure.subplots_adjust(left=.065, right=.98, top=.80, bottom=.19 if interactive else .09,
                                     hspace=.42, wspace=.32)
         self.figure.canvas.manager.set_window_title("KFall · comparativa de predicciones")
-        self.figure.text(.065, .965, f"TEST · {self.replay.path.name} · comparación de mejores checkpoints",
+        self.figure.text(.065, .965, f"TEST · {self.replay.path.name} · mejores checkpoints · "
+                         f"etiquetado {self.replay.config.get('label_policy', 'legacy')}",
                          fontsize=16, weight="bold")
         self.status = []
         self.plots = []

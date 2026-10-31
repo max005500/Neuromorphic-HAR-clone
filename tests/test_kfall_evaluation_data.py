@@ -87,6 +87,11 @@ class KFallEvaluationDataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "preprocessing config"):
             load_evaluation_data(self.run, self.checkpoint_config)
 
+    def test_legacy_checkpoint_ignores_unused_old_pre_fall_default(self):
+        changed = {**self.checkpoint_config, "pre_fall_seconds": 2.0}
+        arrays, _, _, _ = load_evaluation_data(self.run, changed)
+        self.assertGreater(len(arrays["y_h1"]), 0)
+
     def test_runtime_settings_do_not_change_data_identity(self):
         self.rewrite_cache_metadata(lambda value: value["config"].update(batch_size=1, num_workers=0,
                                                                          pin_memory=False, verbose_every=9))

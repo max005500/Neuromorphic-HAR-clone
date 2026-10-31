@@ -54,6 +54,13 @@ class ReplayPlot:
         if probabilities.ndim != 2 or probabilities.shape[1] not in {3, 4}:
             raise ValueError("Replay probabilities must have three or four activity classes.")
         self.class_names = class_names(probabilities.shape[1])
+        labels = getattr(replay, "true_labels", None)
+        self.true_labels = None if labels is None else np.asarray(labels)
+        if self.true_labels is not None and (
+            self.true_labels.shape != self.times.shape
+            or not np.isin(self.true_labels, [-1, *self.class_names]).all()
+        ):
+            raise ValueError("Replay truth labels must align with recorded samples and activity classes.")
         self.post_impact_end_time = getattr(replay, "post_impact_end_time", None)
         if self.post_impact_end_time is None and replay.fall_impact_time is not None:
             duration = float(getattr(replay, "post_impact_seconds", 0.0)
@@ -157,6 +164,18 @@ class ReplayPlot:
         return intervals
 
     def _truth_intervals(self, now: float) -> list[tuple[float, float, str]]:
+        if self.true_labels is not None:
+            available = int(np.searchsorted(self.times, now, side="right"))
+            labels = self.true_labels[:available]
+            if not len(labels):
+                return []
+            boundaries = np.flatnonzero(np.r_[True, labels[1:] != labels[:-1]])
+            intervals = []
+            for number, index in enumerate(boundaries):
+                left = float(self.times[index])
+                right = float(self.times[boundaries[number + 1]]) if number + 1 < len(boundaries) else now
+                intervals.append((left, right, CLASS_COLORS.get(int(labels[index]), POST_IMPACT_COLOR)))
+            return intervals
         start = float(self.times[0])
         onset, impact = self.replay.fall_onset_time, self.replay.fall_impact_time
         if onset is None:
@@ -175,6 +194,9 @@ class ReplayPlot:
         return intervals
 
     def _real_phase(self, now: float) -> str:
+        if self.true_labels is not None:
+            index = max(0, int(np.searchsorted(self.times, now, side="right")) - 1)
+            return CLASS_LABELS.get(int(self.true_labels[index]), "Sin etiqueta temporal")
         onset, impact = self.replay.fall_onset_time, self.replay.fall_impact_time
         if onset is None:
             return self.class_names[int(self.replay.record["label_id"])]

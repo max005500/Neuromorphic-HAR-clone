@@ -40,6 +40,7 @@ class WindowExperiment:
     cache_name: str
     run_name: str
     resample_hz: float | None = None
+    label_tag: str = ""
 
 
 def _tag(value: float) -> str:
@@ -53,6 +54,7 @@ def build_experiment_specs(
     endpoint_policy: str = "matched",
     resample_hz: float | None = None,
     encoding_tag: str | None = None,
+    label_tag: str = "",
 ) -> list[WindowExperiment]:
     """Resolve durations on KFall's 100 Hz grid without changing the baseline."""
     if not durations:
@@ -89,17 +91,19 @@ def build_experiment_specs(
             stem += f"_hz{resample_hz:g}".replace(".", "p")
         if encoding_tag is not None:
             stem += f"_enc{encoding_tag}"
+        stem += label_tag
         experiments.append(WindowExperiment(
             duration_seconds=duration, raw_win=raw_win, out_win=out_win, stride=int(stride),
             post_impact_seconds=float(post_impact_seconds), endpoint_context=context,
             event_length_policy=event_length_policy, cache_name=f"compare_{stem}", run_name=f"kfall_{stem}",
-            resample_hz=resample_hz,
+            resample_hz=resample_hz, label_tag=label_tag,
         ))
     return experiments
 
 
 def _loader_config(experiment: WindowExperiment, args: argparse.Namespace):
     from loaders.kfall_event_loader import KFallEventLoaderConfig
+    from train_kfall import label_config
 
     return KFallEventLoaderConfig(
         seed=args.seed, split=tuple(args.split), raw_win=experiment.raw_win,
@@ -109,6 +113,7 @@ def _loader_config(experiment: WindowExperiment, args: argparse.Namespace):
         theta_sd=tuple(args.theta), dead_zone=args.dead_zone, sd_init=args.sd_init,
         fall_policy="pre_impact", verbose_every=0,
         resample_hz=experiment.resample_hz,
+        **label_config(args),
     )
 
 
@@ -177,6 +182,7 @@ def inspect_dataset(args: argparse.Namespace, experiments: Sequence[WindowExperi
 
 
 def training_command(args: argparse.Namespace, experiment: WindowExperiment) -> list[str]:
+    from train_kfall import label_command_args
     command = [sys.executable, str(PROJECT_ROOT / "train_kfall.py"),
                "--dataset-root", str(Path(args.dataset_root).resolve()),
                "--cache-dir", str(Path(args.cache_dir).resolve()), "--cache-name", experiment.cache_name,
@@ -192,6 +198,7 @@ def training_command(args: argparse.Namespace, experiment: WindowExperiment) -> 
                "--gpu", str(args.gpu), "--device", args.device]
     if args.label_dir is not None:
         command.extend(("--label-dir", str(Path(args.label_dir).resolve())))
+    command.extend(label_command_args(args))
     if experiment.resample_hz is not None:
         command.extend(("--resample-hz", str(experiment.resample_hz)))
     if experiment.endpoint_context is not None:
@@ -254,9 +261,10 @@ RUN_RUNTIME_FIELDS = {
 
 
 def _config_identity(config: dict[str, Any]) -> str:
+    from train_kfall import LABEL_CONFIG_DEFAULTS
     normalized = dict(config)
     for key, default in {"resample_hz": None, "theta_file": None, "validation_only": False,
-                         "train_per_class": 0}.items():
+                         "train_per_class": 0, **LABEL_CONFIG_DEFAULTS}.items():
         normalized.setdefault(key, default)
     return json.dumps({key: value for key, value in normalized.items() if key not in RUN_RUNTIME_FIELDS},
                       sort_keys=True, separators=(",", ":"))
@@ -452,6 +460,7 @@ def _save_coverage(path: Path, inspection: dict[str, Any]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     from loaders.kfall_event_loader import DEFAULT_THETA_KFALL
+    from train_kfall import add_label_arguments
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("inspect", "preprocess", "train"), default="inspect",
@@ -468,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="matched uses the longest context's endpoints for all durations; natural retains each duration's own coverage.")
     parser.add_argument("--stride", type=int, default=102)
     parser.add_argument("--post-impact-seconds", type=float, default=1.2)
+    add_label_arguments(parser)
     parser.add_argument("--resample-hz", type=float, default=None,
                         help="Optional intermediate analog interpolation frequency, e.g. 200; event steps are unchanged.")
     parser.add_argument("--seed", type=int, default=0)
@@ -493,7 +503,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         from loaders.kfall_event_loader import DEFAULT_THETA_KFALL
-        from train_kfall import read_theta_file
+        from train_kfall import read_theta_file, label_cache_tag
 
         if args.theta_file is not None:
             args.theta = read_theta_file(args.theta_file)
@@ -508,7 +518,8 @@ def main(argv: list[str] | None = None) -> None:
                                              fixed_out_win=args.fixed_out_win, stride=args.stride,
                                              post_impact_seconds=args.post_impact_seconds,
                                              endpoint_policy=args.endpoint_policy,
-                                             resample_hz=args.resample_hz, encoding_tag=encoding_tag)
+                                             resample_hz=args.resample_hz, encoding_tag=encoding_tag,
+                                             label_tag=label_cache_tag(args))
         inspection = inspect_dataset(args, experiments)
         inspection["commands"] = [training_command(args, experiment) for experiment in experiments]
         args.results_dir.mkdir(parents=True, exist_ok=True)

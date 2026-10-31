@@ -68,6 +68,7 @@ def build_candidates(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from train_kfall import add_label_arguments
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, default=Path("data/KFall"))
     parser.add_argument("--label-dir", type=Path, default=None)
@@ -79,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stride", type=int, default=102, help="Stride on the native 100 Hz frame grid.")
     parser.add_argument("--endpoint-context", type=int, default=None, help="Native samples required before all prediction endpoints.")
     parser.add_argument("--post-impact-seconds", type=float, default=1.2)
+    add_label_arguments(parser)
     parser.add_argument("--resample-hz", type=float, default=200.0, help="Intermediate analog interpolation rate; native annotations remain at 100 Hz.")
     thresholds = parser.add_mutually_exclusive_group()
     thresholds.add_argument("--theta", type=float, nargs=6, default=list(DEFAULT_THETA))
@@ -104,12 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _identity(config: dict[str, Any]) -> str:
+    from train_kfall import LABEL_CONFIG_DEFAULTS
+    config = {**LABEL_CONFIG_DEFAULTS, **config}
     return json.dumps({key: value for key, value in config.items() if key not in RUNTIME_FIELDS},
                       sort_keys=True, separators=(",", ":"))
 
 
 def search_settings(args: argparse.Namespace) -> dict[str, Any]:
     """Include every training-affecting search option in the experiment identity."""
+    from train_kfall import label_config
     return {
         "dataset_root": str(args.dataset_root.resolve()),
         "label_dir": str((args.label_dir or args.dataset_root / "label_data").resolve()),
@@ -122,6 +127,7 @@ def search_settings(args: argparse.Namespace) -> dict[str, Any]:
         "split": list(args.split), "seed": args.seed, "epochs": args.epochs,
         "train_per_class": args.train_per_class, "batch_size": args.batch_size,
         "workers": args.workers, "device": args.device, "gpu": args.gpu,
+        **label_config(args),
     }
 
 
@@ -131,6 +137,7 @@ def candidate_name(candidate: ThresholdCandidate, settings: dict[str, Any]) -> s
 
 
 def training_command(args: argparse.Namespace, candidate: ThresholdCandidate) -> list[str]:
+    from train_kfall import label_command_args
     settings = search_settings(args)
     name = candidate_name(candidate, settings)
     command = [sys.executable, str(PROJECT_ROOT / "train_kfall.py"),
@@ -148,6 +155,7 @@ def training_command(args: argparse.Namespace, candidate: ThresholdCandidate) ->
                "--device", args.device, "--gpu", str(args.gpu), "--validation-only", "--quiet-loader"]
     if args.endpoint_context is not None:
         command.extend(("--endpoint-context", str(args.endpoint_context)))
+    command.extend(label_command_args(args))
     return command
 
 
@@ -175,7 +183,7 @@ def collect_candidate(
 ) -> dict[str, Any]:
     """Validate a completed run using validation arrays and source metadata."""
     from sklearn.metrics import balanced_accuracy_score, f1_score, recall_score
-    from train_kfall import get_args, training_subset_indices
+    from train_kfall import get_args, training_subset_indices, label_config, LABEL_CONFIG_DEFAULTS
     import torch
 
     expected = vars(get_args(training_command(args, candidate)[2:]))
@@ -212,8 +220,10 @@ def collect_candidate(
         stride=args.stride, endpoint_context=args.endpoint_context, post_impact_seconds=args.post_impact_seconds,
         theta_sd=candidate.theta, dead_zone=args.dead_zone, sd_init=args.sd_init,
         fall_policy="pre_impact", resample_hz=args.resample_hz,
+        **label_config(args),
     )
-    if metadata["config"] != json.loads(json.dumps(asdict(loader_cfg))):
+    normalized_metadata = {**LABEL_CONFIG_DEFAULTS, **metadata["config"]}
+    if normalized_metadata != json.loads(json.dumps(asdict(loader_cfg))):
         raise ValueError("Candidate cache has different encoder settings.")
     truth = np.load(run / "metrics/y_true_val.npy", allow_pickle=False)
     prediction = np.load(run / "metrics/y_pred_val.npy", allow_pickle=False)
@@ -357,10 +367,12 @@ def main(argv: list[str] | None = None) -> None:
             args.theta = read_theta_file(args.theta_file)
         candidates = build_candidates(args.theta, args.acc_scales, args.gyro_scales)
         settings = search_settings(args)
+        from train_kfall import label_config
         from loaders.kfall_event_loader import KFallEventLoaderConfig, _source_signature
         KFallEventLoaderConfig(raw_win=settings["raw_win"], out_win=settings["out_win"], stride=args.stride,
                               endpoint_context=args.endpoint_context, post_impact_seconds=args.post_impact_seconds,
-                              resample_hz=args.resample_hz, dead_zone=args.dead_zone)
+                              resample_hz=args.resample_hz, dead_zone=args.dead_zone,
+                              **label_config(args))
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     source_signature = _source_signature(args.dataset_root, Path(settings["label_dir"]))

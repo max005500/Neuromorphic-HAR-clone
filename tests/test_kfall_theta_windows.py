@@ -14,7 +14,7 @@ import numpy as np
 from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events, window_targets_for_record
 from optimize_theta import build_parser
 from preprocess.event_encoding import sigma_delta
-from preprocess.kfall_labels import class_names
+from preprocess.kfall_labels import class_names, label_policy_kwargs
 from theta_optimization.utils import RunConfig, ThetaOptimizer, build_split, prepare_kfall
 
 
@@ -108,7 +108,8 @@ class KFallThetaWindowTests(unittest.TestCase):
                 for file_index, endpoint, label in values:
                     record = fixture[2][file_index]
                     expected_cfg = KFallEventLoaderConfig(raw_win=cfg.raw_win, out_win=cfg.out_len,
-                        stride=cfg.window_stride, endpoint_context=410, post_impact_seconds=1.2)
+                        stride=cfg.window_stride, endpoint_context=410, post_impact_seconds=1.2,
+                        **label_policy_kwargs(cfg))
                     starts, targets = window_targets_for_record(fixture[0][file_index], record, expected_cfg)
                     expected = {(int(record["frames"][start + cfg.raw_win - 1]), int(target))
                                 for start, target in zip(starts, targets)}

@@ -33,12 +33,49 @@ from loaders.kfall_event_loader import KFallEventLoaderConfig, load_or_build_kfa
 from loaders.utils import balanced_class_weights
 from models.models import DualHeadSCN, SingleHeadSCN
 from preprocess.utils import named_class_counts
-from preprocess.kfall_labels import class_names, event_steps_for_samples, window_samples
+from preprocess.kfall_labels import (class_names, event_steps_for_samples, window_samples,
+                                     LABEL_POLICY_DEFAULTS, label_policy_kwargs)
 from train_sisfall import run_epoch_dual
 from train_ucihar import run_epoch as run_epoch_single
 
 
 CLASS_NAMES = class_names(3)
+LABEL_CONFIG_DEFAULTS = LABEL_POLICY_DEFAULTS
+
+
+def add_label_arguments(parser: argparse.ArgumentParser) -> None:
+    """Use temporal labels for new experiments; old saved configs remain legacy."""
+    parser.add_argument("--label-policy", choices=["legacy", "temporal", "motion"], default="temporal",
+                        help="temporal uses explicit Dynamic/Static intervals; motion uses causal sensor variation; legacy preserves task-level labels.")
+    parser.add_argument("--adl-margin-seconds", type=float, default=1.5,
+                        help="Static margin at both ends of non-fall recordings.")
+    parser.add_argument("--pre-fall-seconds", type=float, default=1.2,
+                        help="Dynamic interval immediately before fall onset.")
+    parser.add_argument("--post-recovery-seconds", type=float, default=2.0,
+                        help="Dynamic interval immediately after postimpact ends.")
+    parser.add_argument("--motion-window-seconds", type=float, default=.25)
+    parser.add_argument("--motion-acc-threshold", type=float, default=.08,
+                        help="Motion variation threshold in g; independent of Sigma-Delta theta.")
+    parser.add_argument("--motion-gyr-threshold", type=float, default=10.,
+                        help="Motion variation threshold in degrees/s; independent of Sigma-Delta theta.")
+
+
+def label_config(config: argparse.Namespace | dict[str, Any]) -> dict[str, Any]:
+    """Resolve missing policy fields using the pre-migration labeling defaults."""
+    return label_policy_kwargs(config)
+
+
+def label_command_args(config: argparse.Namespace) -> list[str]:
+    return [part for key, value in label_config(config).items()
+            for part in ("--" + key.replace("_", "-"), str(value))]
+
+
+def label_cache_tag(config: argparse.Namespace | dict[str, Any]) -> str:
+    settings = label_config(config)
+    if settings == LABEL_CONFIG_DEFAULTS:
+        return ""
+    digest = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:12]
+    return f"_labels{settings['label_policy']}_{digest}"
 
 
 def read_theta_file(path: str | Path) -> list[float]:
@@ -129,8 +166,9 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--resample-hz", type=float, default=None, help="Optional analog interpolation rate, e.g. 200 Hz, before the event grid. Native annotations remain at 100 Hz.")
     p.add_argument("--stride", type=int, default=defaults.stride, help="Stride in raw samples.")
     p.add_argument("--endpoint-context", type=int, default=None, help="Minimum available context for shared comparison endpoints; must be >= raw-win.")
-    p.add_argument("--post-impact-seconds", type=float, default=1.2, help="Postimpact label duration after impact; 0 preserves the legacy three-class task.")
+    p.add_argument("--post-impact-seconds", type=float, default=1.2, help="Postimpact label duration after impact; 0 disables that class. Add --label-policy legacy to reproduce the original task.")
     p.add_argument("--fall-policy", choices=["pre_impact", "annotated_interval"], default=defaults.fall_policy, help="pre_impact excludes the impact sample; annotated_interval can include it.")
+    add_label_arguments(p)
     theta = p.add_mutually_exclusive_group()
     theta.add_argument("--theta", type=float, nargs=6, default=None, help="Encoder steps in g (first three) and deg/s (last three); tune using training subjects.")
     theta.add_argument("--theta-file", default=None, help="JSON result containing theta_best or best_theta from a threshold search.")
@@ -189,7 +227,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
                                post_impact_seconds=cfg.post_impact_seconds,
                                endpoint_context=cfg.endpoint_context, fall_policy=cfg.fall_policy,
                                theta_sd=tuple(cfg.theta), dead_zone=cfg.dead_zone,
-                               resample_hz=cfg.resample_hz)
+                               resample_hz=cfg.resample_hz, **label_config(cfg))
     except (ValueError, OSError) as exc:
         p.error(str(exc))
     if cfg.cache_name is None:
@@ -205,6 +243,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
                 [cfg.theta, cfg.dead_zone, cfg.sd_init], separators=(",", ":")
             ).encode()).hexdigest()[:12]
             cfg.cache_name += f"_enc{encoding_tag}"
+        cfg.cache_name += label_cache_tag(cfg)
     cfg.n_ch = 6
     cfg.dataset = "kfall"
     cfg.n_classes = 4 if cfg.post_impact_seconds > 0 else 3
@@ -230,6 +269,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         post_impact_seconds=getattr(cfg, "post_impact_seconds", 0.0),
         endpoint_context=getattr(cfg, "endpoint_context", None),
         resample_hz=getattr(cfg, "resample_hz", None),
+        **label_config(cfg),
     )
     splits, metadata = load_or_build_kfall_event_splits(
         dataset_root=cfg.dataset_root,

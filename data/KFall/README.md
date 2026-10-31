@@ -62,11 +62,57 @@ python animate_kfall.py --run-dir runs/kfall_scn_YYYYMMDD_HHMMSS
 ```
 
 Subjects are assigned to disjoint partitions before windowing. Default classes
-are Fall, Dynamic, Static, and Postimpact. Fall spans onset to just before impact;
-Postimpact spans impact through the following 1.20 seconds (end excluded).
-Targets describe the last sample of each input window. Use
-`--post-impact-seconds 0` for the original three-class task. Generated event
-caches are stored separately under `data/kfall_cache/` with distinct names.
+are Fall, Dynamic, Static, and Postimpact. New runs default to
+`--label-policy temporal`, with targets determined by each window's last sample:
+
+- **No fall:** Dynamic from 1.50 seconds after the beginning until 1.50 seconds
+  before the end; the margins are Static. A recording too short for that
+  interior remains Static.
+- **Fall:** Dynamic during the 1.20 seconds before onset and during the 2.00
+  seconds after the **end of Postimpact**. Fall spans `[onset, impact)`;
+  Postimpact spans `[impact, impact + 1.20 s)`. Everything else is Static.
+
+Intervals include the beginning and exclude the end, are clipped to observations,
+and use the native 100 Hz frame grid. Recording coverage is
+`[first_frame, last_frame + 1)`. These Dynamic/Static targets are experimental
+rules; the original XLSX annotations are read and never modified. Configure
+margins with `--adl-margin-seconds`, `--pre-fall-seconds`, and
+`--post-recovery-seconds`.
+
+`--label-policy motion` is an optional sensor-based alternative: outside Fall
+and Postimpact, trailing variation determines Dynamic/Static. The initial
+heuristics use 0.25 s lookback, 0.08 g accelerometer axis range, or 10 degrees/s
+gyroscope axis range. They are not calibrated labels and are distinct from
+encoder thresholds. Configure `--motion-window-seconds`,
+`--motion-acc-threshold`, and `--motion-gyr-threshold` explicitly when exploring
+this mode.
+
+Existing models retain their saved label policy; missing policy metadata means
+`legacy`. To reproduce original task-family labels and the original three-class
+task, use `--label-policy legacy --post-impact-seconds 0`. New labels require
+new caches and retraining; old model scores do not evaluate the updated targets.
+Generated event caches are stored under `data/kfall_cache/`, with label settings
+included in their identity.
+
+Prepare or train updated one-second windows:
+
+```bash
+python train_kfall.py --preprocess-only \
+  --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
+  --theta-file configs/kfall_theta_200hz.json \
+  --label-policy temporal --post-impact-seconds 1.20 --workers 0
+
+python train_kfall.py \
+  --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
+  --theta-file configs/kfall_theta_200hz.json \
+  --label-policy temporal --post-impact-seconds 1.20 \
+  --epochs 100 --batch-size 32 --workers 0 --device auto \
+  --run kfall_1p00s_200hz_temporal
+```
+
+The comparison context of 410 samples preserves common endpoints with longer
+models. Use `--endpoint-context 100` to include natural one-second coverage.
+Train all compared durations using the same new label policy.
 
 The 200 Hz stage inserts intermediate values; acquisition and annotation frames
 remain at 100 Hz. It does not create independent measurements or new recordings.
@@ -74,7 +120,9 @@ The event encoder retains its separate temporal grid. Threshold searches save
 `best_theta.json`, which can be supplied to training with `--theta-file` while
 keeping the same window, subject split, interpolation, and encoder settings.
 The portable preset [`configs/kfall_theta_200hz.json`](../../configs/kfall_theta_200hz.json)
-is included with the source code. Files under `results/`, including generated
+is included with the source code. Its calibration used legacy labels; the new
+temporal targets require new validation before claiming optimal thresholds.
+Files under `results/`, including generated
 `best_theta.json` reports, are ignored by Git. From the repository root, use
 `--theta-file configs/kfall_theta_200hz.json --resample-hz 200`; select the window
 duration and endpoint context explicitly as described in the project README.

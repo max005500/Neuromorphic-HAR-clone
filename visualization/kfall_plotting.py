@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from visualization.kfall_replay_plot import CLASS_COLORS, CLASS_LABELS, POST_IMPACT_COLOR
 
 if TYPE_CHECKING:
     from visualization.kfall_data import WindowData
@@ -14,11 +15,27 @@ def _annotate_fall(axis, window: WindowData, start: float, stop: float) -> None:
     onset = window.fall_onset_time
     impact = window.fall_impact_time
     post_end = getattr(window, "post_impact_end_time", None)
-    if onset is not None and np.isfinite(onset) and onset <= stop:
+    labels = getattr(window, "frame_labels", None)
+    if labels is not None:
+        labels = np.asarray(labels)
+        times = np.asarray(window.time_raw)
+        if labels.shape != times.shape:
+            raise ValueError("Window temporal labels must align with raw samples.")
+        boundaries = np.flatnonzero(np.r_[True, labels[1:] != labels[:-1]])
+        seen = set()
+        for number, index in enumerate(boundaries):
+            left = max(start, float(times[index]))
+            right = min(stop, float(times[boundaries[number + 1]]) if number + 1 < len(boundaries) else stop)
+            label = int(labels[index])
+            if right > left:
+                axis.axvspan(left, right, color=CLASS_COLORS.get(label, POST_IMPACT_COLOR), alpha=.08,
+                             linewidth=0, label=CLASS_LABELS.get(label, "Sin etiqueta") if label not in seen else None)
+                seen.add(label)
+    elif onset is not None and np.isfinite(onset) and onset <= stop:
         end = min(stop, impact) if impact is not None and np.isfinite(impact) else stop
         if end > max(start, onset):
             axis.axvspan(max(start, onset), end, color="#dc2626", alpha=0.055, linewidth=0)
-    if impact is not None and post_end is not None and max(start, impact) < min(stop, post_end):
+    if labels is None and impact is not None and post_end is not None and max(start, impact) < min(stop, post_end):
         axis.axvspan(max(start, impact), min(stop, post_end), color="#d97706", alpha=0.08, linewidth=0)
     for moment, label, color in ((onset, "Inicio caída", "#9333ea"),
                                  (impact, "Impacto", "#dc2626"),
