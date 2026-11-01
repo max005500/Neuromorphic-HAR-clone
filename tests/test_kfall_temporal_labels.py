@@ -31,12 +31,24 @@ class TemporalLabelsTests(unittest.TestCase):
         for task_label in (1, 2):
             record = {'T': 1000, 'label_id': task_label}
             labels = record_frame_labels(self.frames, record, **self.kwargs)
-            np.testing.assert_array_equal(labels[:150], 2)
-            np.testing.assert_array_equal(labels[150:-150], 1)
-            np.testing.assert_array_equal(labels[-150:], 2)
-        for length in (100, 299, 300):
+            np.testing.assert_array_equal(labels[:100], 2)
+            np.testing.assert_array_equal(labels[100:-100], 1)
+            np.testing.assert_array_equal(labels[-100:], 2)
+        for length in (100, 199, 200):
             labels = record_frame_labels(self.frames[:length], {'T': length, 'label_id': 1}, **self.kwargs)
             self.assertTrue(np.all(labels == 2))
+        labels = record_frame_labels(self.frames[:201], {'T': 201, 'label_id': 1}, **self.kwargs)
+        np.testing.assert_array_equal(np.flatnonzero(labels == 1), [100])
+
+    def test_explicit_saved_adl_margin_remains_supported(self):
+        record = {'T': 1000, 'label_id': 2}
+        old = record_frame_labels(self.frames, record, adl_margin_seconds=1.5, **self.kwargs)
+        current = record_frame_labels(self.frames, record, **self.kwargs)
+        self.assertEqual(old[100], 2)
+        self.assertEqual(current[100], 1)
+        np.testing.assert_array_equal(old[:150], 2)
+        np.testing.assert_array_equal(old[150:-150], 1)
+        np.testing.assert_array_equal(old[-150:], 2)
 
     def test_explicit_saved_two_second_policy_keeps_its_original_labels(self):
         old = record_frame_labels(self.frames, self.record, pre_fall_seconds=2.0, **self.kwargs)

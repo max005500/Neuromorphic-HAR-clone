@@ -25,9 +25,10 @@ class TemporalCLI(unittest.TestCase):
         legacy = get_args(['--label-policy', 'legacy'])
         self.assertEqual(temporal.label_policy, 'temporal')
         self.assertEqual(temporal.pre_fall_seconds, 1.2)
+        self.assertEqual(temporal.adl_margin_seconds, 1.0)
         self.assertEqual(temporal.post_recovery_seconds, 2.0)
         self.assertNotEqual(temporal.cache_name, legacy.cache_name)
-        for flags in (['--adl-margin-seconds', '1'], ['--pre-fall-seconds', '2'],
+        for flags in (['--adl-margin-seconds', '1.5'], ['--pre-fall-seconds', '2'],
                       ['--post-recovery-seconds', '1'], ['--label-policy', 'motion']):
             self.assertNotEqual(get_args(flags).cache_name, temporal.cache_name)
 

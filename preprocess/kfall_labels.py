@@ -73,7 +73,7 @@ def label_at_frame(
 
 
 LABEL_POLICY_DEFAULTS = {
-    "label_policy": "legacy", "adl_margin_seconds": 1.5,
+    "label_policy": "legacy", "adl_margin_seconds": 1.0,
     "pre_fall_seconds": 1.2, "post_recovery_seconds": 2.0,
     "motion_window_seconds": 0.25, "motion_acc_threshold": 0.08,
     "motion_gyr_threshold": 10.0,
@@ -124,7 +124,7 @@ def labels_from_intervals(frames: np.ndarray, intervals: list) -> np.ndarray:
 def record_frame_labels(
     frames: np.ndarray, record: dict[str, Any], *, post_impact_seconds: float = 0.0,
     sample_rate_hz: float = 100.0, fall_policy: str = "pre_impact", label_policy: str = "legacy",
-    adl_margin_seconds: float = 1.5, pre_fall_seconds: float = 1.2,
+    adl_margin_seconds: float = 1.0, pre_fall_seconds: float = 1.2,
     post_recovery_seconds: float = 2.0, signal: np.ndarray | None = None,
     motion_window_seconds: float = 0.25, motion_acc_threshold: float = 0.08,
     motion_gyr_threshold: float = 10.0,

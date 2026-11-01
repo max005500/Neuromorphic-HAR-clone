@@ -88,7 +88,7 @@ class KFallEvaluationDataTests(unittest.TestCase):
             load_evaluation_data(self.run, self.checkpoint_config)
 
     def test_legacy_checkpoint_ignores_unused_old_pre_fall_default(self):
-        changed = {**self.checkpoint_config, "pre_fall_seconds": 2.0}
+        changed = {**self.checkpoint_config, "pre_fall_seconds": 2.0, "adl_margin_seconds": 1.5}
         arrays, _, _, _ = load_evaluation_data(self.run, changed)
         self.assertGreater(len(arrays["y_h1"]), 0)
 

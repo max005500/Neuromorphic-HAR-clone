@@ -52,7 +52,7 @@ class KFallTemporalReplayPlotTests(unittest.TestCase):
         replay.fall_onset_time = replay.fall_impact_time = replay.post_impact_end_time = None
         replay.true_labels = record_frame_labels(replay.frames, replay.record, label_policy='temporal')
         plot = self.plot(replay)
-        for moment, expected in ((1.49, 'Estático'), (1.5, 'Dinámico'), (4.5, 'Dinámico'), (4.51, 'Estático')):
+        for moment, expected in ((.99, 'Estático'), (1.0, 'Dinámico'), (5.0, 'Dinámico'), (5.01, 'Estático')):
             self.assertEqual(plot.update(moment)['real_phase'], expected)
 
     def test_misaligned_labels_are_rejected(self):

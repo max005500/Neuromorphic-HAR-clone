@@ -144,8 +144,8 @@ def load_evaluation_data(
     if _normalized(config) != _normalized(_data_config(cache_metadata)):
         raise ValueError("Event cache preprocessing config differs from the training run.")
     for saved_key, data_key in CHECKPOINT_DATA_KEYS.items():
-        # Legacy task-level targets never used a pre-fall Dynamic interval.
-        if saved_key == "pre_fall_seconds" and config.get("label_policy") == "legacy":
+        # Legacy task-level targets never used Dynamic temporal margins.
+        if saved_key in {"pre_fall_seconds", "adl_margin_seconds"} and config.get("label_policy") == "legacy":
             continue
         if (saved_key not in checkpoint_config and saved_key not in OPTIONAL_DATA_DEFAULTS) or data_key not in config:
             raise ValueError(f"Missing checkpoint/preprocessing setting: {saved_key}.")

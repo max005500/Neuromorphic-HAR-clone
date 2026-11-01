@@ -47,7 +47,7 @@ def add_label_arguments(parser: argparse.ArgumentParser) -> None:
     """Use temporal labels for new experiments; old saved configs remain legacy."""
     parser.add_argument("--label-policy", choices=["legacy", "temporal", "motion"], default="temporal",
                         help="temporal uses explicit Dynamic/Static intervals; motion uses causal sensor variation; legacy preserves task-level labels.")
-    parser.add_argument("--adl-margin-seconds", type=float, default=1.5,
+    parser.add_argument("--adl-margin-seconds", type=float, default=1.0,
                         help="Static margin at both ends of non-fall recordings.")
     parser.add_argument("--pre-fall-seconds", type=float, default=1.2,
                         help="Dynamic interval immediately before fall onset.")

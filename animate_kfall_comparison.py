@@ -43,7 +43,7 @@ def validate_comparison(replays):
         for key in ("subject", "code", "trial", "fall_onset_frame", "fall_impact_frame"):
             if replay.record.get(key) != reference.record.get(key):
                 raise ValueError("Los modelos no comparten la misma grabación o anotaciones.")
-        defaults = {"label_policy": "legacy", "adl_margin_seconds": 1.5, "pre_fall_seconds": 1.2,
+        defaults = {"label_policy": "legacy", "adl_margin_seconds": 1.0, "pre_fall_seconds": 1.2,
                     "post_recovery_seconds": 2., "motion_window_seconds": .25,
                     "motion_acc_threshold": .08, "motion_gyr_threshold": 10.}
         for key in ("split", "seed", "post_impact_seconds", "n_classes", *defaults):

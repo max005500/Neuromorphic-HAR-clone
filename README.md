@@ -79,11 +79,12 @@ are assigned to the recording before selecting input windows:
 | 2 | `Static` | All remaining observed samples |
 | 3 | `Postimpact` | `impact <= frame < impact + 120` at 100 Hz |
 
-For **recordings without a fall**, Dynamic starts 1.50 seconds after the first
-sample and stops 1.50 seconds before the recording's end. The initial and final
+For **recordings without a fall**, Dynamic starts 1.00 second after the first
+sample and stops 1.00 second before the recording's end. The initial and final
 margins are Static. Recording coverage is `[first_frame, last_frame + 1)`; both
-margins contain 150 native frame positions. If the recording is too short for a
-nonempty interior, it remains entirely Static. The old ADL task family does not
+margins contain 100 native frame positions, so Dynamic spans
+`[first_frame + 100, last_frame + 1 - 100)` at 100 Hz. Recordings lasting at most
+2.00 seconds remain entirely Static. The old ADL task family does not
 determine these new temporal labels.
 
 For **fall recordings**, Dynamic occupies the 1.20 seconds immediately before
@@ -123,7 +124,7 @@ Generate and train **one-second windows with the updated temporal labels**:
 python train_kfall.py --preprocess-only \
   --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
   --theta-file configs/kfall_theta_200hz.json \
-  --label-policy temporal --adl-margin-seconds 1.50 \
+  --label-policy temporal --adl-margin-seconds 1.00 \
   --pre-fall-seconds 1.20 --post-recovery-seconds 2.00 \
   --post-impact-seconds 1.20 --workers 0
 
@@ -131,7 +132,7 @@ python train_kfall.py --preprocess-only \
 python train_kfall.py \
   --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
   --theta-file configs/kfall_theta_200hz.json \
-  --label-policy temporal --adl-margin-seconds 1.50 \
+  --label-policy temporal --adl-margin-seconds 1.00 \
   --pre-fall-seconds 1.20 --post-recovery-seconds 2.00 \
   --post-impact-seconds 1.20 \
   --epochs 100 --batch-size 32 --workers 0 --device auto \

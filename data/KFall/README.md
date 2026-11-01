@@ -65,9 +65,10 @@ Subjects are assigned to disjoint partitions before windowing. Default classes
 are Fall, Dynamic, Static, and Postimpact. New runs default to
 `--label-policy temporal`, with targets determined by each window's last sample:
 
-- **No fall:** Dynamic from 1.50 seconds after the beginning until 1.50 seconds
-  before the end; the margins are Static. A recording too short for that
-  interior remains Static.
+- **No fall:** Dynamic from 1.00 second after the beginning until 1.00 second
+  before the end; the first and last 100 native frame positions are Static.
+  Dynamic spans `[first_frame + 100, last_frame + 1 - 100)` at 100 Hz.
+  Recordings lasting at most 2.00 seconds remain entirely Static.
 - **Fall:** Dynamic during the 1.20 seconds before onset and during the 2.00
   seconds after the **end of Postimpact**. Fall spans `[onset, impact)`;
   Postimpact spans `[impact, impact + 1.20 s)`. Everything else is Static.

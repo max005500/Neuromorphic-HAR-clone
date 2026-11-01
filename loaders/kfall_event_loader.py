@@ -55,7 +55,7 @@ class KFallEventLoaderConfig:
     endpoint_context: int | None = None
     resample_hz: float | None = None
     label_policy: str = "legacy"
-    adl_margin_seconds: float = 1.5
+    adl_margin_seconds: float = 1.0
     pre_fall_seconds: float = 1.2
     post_recovery_seconds: float = 2.0
     motion_window_seconds: float = 0.25
