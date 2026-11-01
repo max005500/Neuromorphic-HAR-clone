@@ -139,7 +139,9 @@ class KFallTrainingDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         split = self.split
         return {
-            "x": torch.tensor(np.asarray(split["x_ev"][index]), dtype=torch.float32),
+            # Keep binary events compact through collation/pinning/H2D. The
+            # epoch runner casts to float on the training device before use.
+            "x": torch.tensor(np.asarray(split["x_ev"][index]), dtype=torch.uint8),
             "offset": torch.tensor(np.asarray(split["offset"][index]), dtype=torch.float32),
             "y": torch.tensor(int(split["y_h1"][index]), dtype=torch.long),
             "y_h1": torch.tensor(int(split["y_h1"][index]), dtype=torch.long),
@@ -294,6 +296,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
             shuffle=name == "train",
             num_workers=cfg.workers,
             pin_memory=not cfg.no_pin_memory and dev.type == "cuda",
+            persistent_workers=cfg.workers > 0 and name == "train",
         )
         for name, dataset in datasets.items()
     }

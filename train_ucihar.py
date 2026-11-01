@@ -212,8 +212,10 @@ def run_epoch(
     model.train(is_train)
     amp_enabled = bool(cfg.amp and dev.type == "cuda")
 
-    loss_sum = 0.0
-    correct = 0
+    # Keep epoch statistics on the device. Reading CUDA scalars with .item()
+    # inside this loop forces the CPU to wait for every training batch.
+    # Float64 matches the previous Python-float accumulation of batch losses.
+    totals = torch.zeros(2, dtype=torch.float64, device=dev)
     total = 0
     y_true_chunks: list[torch.Tensor] = []
     y_pred_chunks: list[torch.Tensor] = []
@@ -247,21 +249,25 @@ def run_epoch(
             bs = int(y.shape[0])
             pred = logits.argmax(dim=1)
             total += bs
-            loss_sum += float(loss.detach().item()) * bs
-            correct += int((pred == y).sum().item())
+            totals[0].add_(loss.detach().to(torch.float64) * bs)
+            totals[1].add_((pred == y).sum())
 
             if collect_predictions:
-                y_true_chunks.append(y.detach().cpu())
-                y_pred_chunks.append(pred.detach().cpu())
+                # These one-dimensional vectors retain no autograd graph and
+                # are copied to CPU together after the epoch, rather than
+                # introducing an additional synchronization for every batch.
+                y_true_chunks.append(y.detach())
+                y_pred_chunks.append(pred.detach())
 
+    loss_sum, correct = totals.cpu().tolist()
     out = {
         "loss": loss_sum / max(total, 1),
         "acc": correct / max(total, 1),
         "n": int(total),
     }
     if collect_predictions:
-        out["y_true"] = torch.cat(y_true_chunks).numpy() if y_true_chunks else np.array([], dtype=np.int64)
-        out["y_pred"] = torch.cat(y_pred_chunks).numpy() if y_pred_chunks else np.array([], dtype=np.int64)
+        out["y_true"] = torch.cat(y_true_chunks).cpu().numpy() if y_true_chunks else np.array([], dtype=np.int64)
+        out["y_pred"] = torch.cat(y_pred_chunks).cpu().numpy() if y_pred_chunks else np.array([], dtype=np.int64)
     return out
 
 

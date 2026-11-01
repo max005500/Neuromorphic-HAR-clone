@@ -13,6 +13,7 @@ Reference code:
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Iterable, Optional, Sequence, Tuple, Union
 
 import torch
@@ -24,21 +25,34 @@ Number = Union[int, float]
 TripleLike = Union[int, Sequence[int]]
 
 
+@lru_cache(maxsize=128)
+def _surrogate_gamma(value: float, dtype: torch.dtype) -> float:
+    """Retain the old dtype rounding without copying a CUDA scalar to the CPU.
+
+    Gamma is a fixed Python configuration value. The previous implementation
+    rounded it through an input-device scalar at every step, then called item()
+    during backward. Only the rounded number is needed; cache that conversion
+    on the CPU once per gamma/dtype combination instead.
+    """
+    if value == 1.0:
+        return value
+    return float(torch.tensor(value, dtype=dtype, device="cpu").item())
+
+
 class TriangularSurrogate(torch.autograd.Function):
     """Binary spike with triangular surrogate gradient."""
 
     @staticmethod
     def forward(ctx, input_tensor: torch.Tensor, gamma: float) -> torch.Tensor:
-        gamma_value = float(gamma)
+        ctx.gamma = _surrogate_gamma(float(gamma), input_tensor.dtype)
         out = (input_tensor > 0).to(input_tensor.dtype)
-        gamma_tensor = input_tensor.new_tensor(gamma_value)
-        ctx.save_for_backward(input_tensor, gamma_tensor)
+        ctx.save_for_backward(input_tensor)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        input_tensor, gamma_tensor = ctx.saved_tensors
-        gamma = float(gamma_tensor.item())
+        input_tensor, = ctx.saved_tensors
+        gamma = ctx.gamma
         grad = (1.0 / (gamma * gamma)) * (gamma - input_tensor.abs()).clamp(min=0.0)
         return grad_output * grad, None
 

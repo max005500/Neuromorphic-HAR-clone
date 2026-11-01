@@ -786,3 +786,48 @@ python animate_kfall_comparison.py --run-dirs RUTA_2P05 RUTA_3P30 RUTA_4P10 \
 
 También admite `--save-gif results/comparativa.gif`, `--paused`,
 `--prediction-stride 10` y `--view-seconds 6`.
+
+### Medir el rendimiento de la SNN en GPU
+
+El entrenamiento evita sincronizaciones CPU/GPU por cada paso del gradiente
+surrogate y acumula las métricas en el dispositivo. Esto conserva las ecuaciones
+de la red y la compatibilidad de los pesos. La mejora de tiempo depende del equipo.
+Los eventos binarios de KFall permanecen en `uint8` durante la carga y la
+transferencia, y se convierten a `float32` en el dispositivo; esto reduce a una
+cuarta parte el tamaño de esa transferencia respecto a enviarlos en `float32`.
+Con `--workers` mayor que cero, los trabajadores de train se mantienen entre
+épocas. Estas optimizaciones se activan automáticamente, reutilizan las cachés
+actuales y se aplican al iniciar un proceso nuevo de entrenamiento.
+
+Para medir el coste de forward, backward y Adam con la arquitectura KFall:
+
+```bash
+python benchmark_kfall.py --window-seconds 1.00 --batch-size 128 \
+  --device cuda:0 --warmup 5 --steps 20 \
+  --output results/benchmark_kfall_1s.json
+```
+
+El informe guarda milisegundos por lote, muestras por segundo, versión de PyTorch,
+GPU y memoria CUDA máxima. Usa el mismo comando y equipo antes y después de una
+modificación; compara también el tiempo por época del entrenamiento real. Cambia
+`--window-seconds` para probar las demás ventanas. `--amp` activa la misma precisión
+mixta opcional del entrenamiento y debe compararse por separado.
+
+El benchmark utiliza un lote sintético fijo ya residente en la GPU: **excluye
+DataLoader, acceso al dataset y codificación Sigma-Delta**, no mide accuracy ni
+sobrescribe pesos entrenados. Si es rápido y una época real resulta lenta, hay que
+revisar también el suministro de datos. `--device cpu` permite una comprobación
+sin GPU, pero no estima el rendimiento de una RTX 5090.
+
+Para guardar un perfil de tres pasos adicionales, fuera del intervalo cronometrado:
+
+```bash
+python benchmark_kfall.py --window-seconds 1.00 --batch-size 128 \
+  --device cuda:0 --profile results/kfall_cuda_trace.json \
+  --output results/benchmark_kfall_profile.json
+```
+
+El JSON incluye los conteos de `aten::item` y `aten::_local_scalar_dense`; el trace
+permite inspeccionar operaciones CUDA, sincronizaciones y tiempos de CPU en un
+visor compatible con Chrome Trace. El optimizador puede mantener algunas
+operaciones escalares propias incluso después de optimizar las neuronas.
