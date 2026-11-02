@@ -153,3 +153,18 @@ for channel selection, encoding parameters, task grouping, and evaluation limits
   doi={10.3389/fnagi.2021.692865}
 }
 ```
+
+### Whole-record Sigma-Delta pseudo-labels
+
+`--label-policy spikes` encodes each complete recording once on a fixed 200 Hz
+label grid, using the selected theta/dead-zone/init. Only accelerometer ON/OFF events (AccX/AccY/AccZ) form a cluster if consecutive gaps are at most 0.10 s. Clusters
+whose first-to-last span is strictly greater than 0.30 s are Dynamic; remaining
+unprotected samples (including no events and brief/isolated events) are Static.
+Fall and Postimpact take priority and split clusters. Configure with
+`--spike-label-hz`, `--spike-max-gap-seconds`, `--spike-min-duration-seconds`.
+
+Labels are generated offline before windowing and saved as frame intervals.
+A cluster may retroactively label its beginning; model inputs remain causal.
+Changing encoder thresholds can change these pseudo-labels. Keep encoder/label
+settings fixed for window comparisons; they are not independent ground truth
+for threshold optimization. The main README includes the preparation command.

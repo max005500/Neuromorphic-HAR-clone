@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events, window_targets_for_record
-from preprocess.kfall_labels import class_names, record_frame_labels, label_policy_kwargs, record_frames
+from preprocess.kfall_labels import class_names, record_frame_labels, label_policy_kwargs, record_frames, spike_encoder_kwargs
 from preprocess.interpolate_signal import interpolate_to_times
 from preprocess.kfall_resampling import resample_kfall_signal
 from preprocess.preprocess_kfall import load_record
@@ -66,7 +66,7 @@ def _read_record(path: str, mtime_ns: int, size: int):
 
 def source_frame_labels(signal, frames, record, config):
     """Recompute new truth labels and reject an altered temporal manifest."""
-    kwargs = label_policy_kwargs(config)
+    kwargs = {**label_policy_kwargs(config), **spike_encoder_kwargs(config)}
     for name, default in (("post_impact_seconds", 0.), ("sample_rate_hz", 100.), ("fall_policy", "pre_impact")):
         kwargs[name] = config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
     if kwargs["label_policy"] == "legacy":

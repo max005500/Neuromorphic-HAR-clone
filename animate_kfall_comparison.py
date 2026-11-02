@@ -45,7 +45,8 @@ def validate_comparison(replays):
                 raise ValueError("Los modelos no comparten la misma grabación o anotaciones.")
         defaults = {"label_policy": "legacy", "adl_margin_seconds": 1.0, "pre_fall_seconds": 1.2,
                     "post_recovery_seconds": 2., "motion_window_seconds": .25,
-                    "motion_acc_threshold": .08, "motion_gyr_threshold": 10.}
+                    "motion_acc_threshold": .08, "motion_gyr_threshold": 10.,
+                    "spike_min_duration_seconds": .30, "spike_max_gap_seconds": .10, "spike_label_hz": 200.}
         for key in ("split", "seed", "post_impact_seconds", "n_classes", *defaults):
             if replay.config.get(key, defaults.get(key)) != reference.config.get(key, defaults.get(key)):
                 raise ValueError(f"Configuración incompatible entre modelos: {key}.")

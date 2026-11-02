@@ -45,8 +45,8 @@ LABEL_CONFIG_DEFAULTS = LABEL_POLICY_DEFAULTS
 
 def add_label_arguments(parser: argparse.ArgumentParser) -> None:
     """Use temporal labels for new experiments; old saved configs remain legacy."""
-    parser.add_argument("--label-policy", choices=["legacy", "temporal", "motion"], default="temporal",
-                        help="temporal uses explicit Dynamic/Static intervals; motion uses causal sensor variation; legacy preserves task-level labels.")
+    parser.add_argument("--label-policy", choices=["legacy", "temporal", "motion", "spikes"], default="temporal",
+                        help="spikes uses full-record Sigma-Delta clusters; temporal uses explicit intervals; motion uses causal sensor variation; legacy preserves task-level labels.")
     parser.add_argument("--adl-margin-seconds", type=float, default=1.0,
                         help="Static margin at both ends of non-fall recordings.")
     parser.add_argument("--pre-fall-seconds", type=float, default=1.2,
@@ -58,6 +58,13 @@ def add_label_arguments(parser: argparse.ArgumentParser) -> None:
                         help="Motion variation threshold in g; independent of Sigma-Delta theta.")
     parser.add_argument("--motion-gyr-threshold", type=float, default=10.,
                         help="Motion variation threshold in degrees/s; independent of Sigma-Delta theta.")
+
+    parser.add_argument("--spike-min-duration-seconds", type=float, default=.30,
+                        help="Dynamic requires a whole-record spike cluster spanning strictly more than this duration.")
+    parser.add_argument("--spike-max-gap-seconds", type=float, default=.10,
+                        help="Largest gap between consecutive spikes in one cluster.")
+    parser.add_argument("--spike-label-hz", type=float, default=200.,
+                        help="Fixed whole-record Sigma-Delta label grid; independent of model window size.")
 
 
 def label_config(config: argparse.Namespace | dict[str, Any]) -> dict[str, Any]:
@@ -74,7 +81,8 @@ def label_cache_tag(config: argparse.Namespace | dict[str, Any]) -> str:
     settings = label_config(config)
     if settings == LABEL_CONFIG_DEFAULTS:
         return ""
-    digest = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:12]
+    identity = {**settings, "spike_label_sensor": "acc"} if settings["label_policy"] == "spikes" else settings
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
     return f"_labels{settings['label_policy']}_{digest}"
 
 

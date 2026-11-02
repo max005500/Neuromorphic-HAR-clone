@@ -170,6 +170,9 @@ class RunConfig:
     motion_window_seconds: float = .25
     motion_acc_threshold: float = .08
     motion_gyr_threshold: float = 10.
+    spike_min_duration_seconds: float = .30
+    spike_max_gap_seconds: float = .10
+    spike_label_hz: float = 200.
 
     @classmethod
     def from_args(cls, args: Any) -> "RunConfig":

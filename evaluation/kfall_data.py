@@ -152,6 +152,11 @@ def load_evaluation_data(
         saved_value = checkpoint_config.get(saved_key, OPTIONAL_DATA_DEFAULTS.get(saved_key))
         if _normalized(saved_value) != _normalized(config[data_key]):
             raise ValueError(f"Checkpoint {saved_key} differs from the training dataset config.")
+    if config.get("label_policy") == "spikes":
+        from preprocess.kfall_labels import SPIKE_LABEL_DEFAULTS
+        for key in SPIKE_LABEL_DEFAULTS:
+            if key not in config or checkpoint_config.get(key) != config[key]:
+                raise ValueError(f"Checkpoint {key} differs from the spike label configuration.")
     if checkpoint_config.get("dataset", "kfall") != "kfall":
         raise ValueError("The checkpoint belongs to a different dataset.")
     for key in ("version", "source_signature", "channels", "units", "fall_label_rule", "head2_labels_available", "raw_data", "split_summary", "split_file_indices"):

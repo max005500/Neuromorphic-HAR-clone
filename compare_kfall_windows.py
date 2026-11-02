@@ -154,9 +154,13 @@ def _endpoint_audit(recordings, records, partition, cfg) -> dict[str, Any]:
 def inspect_dataset(args: argparse.Namespace, experiments: Sequence[WindowExperiment]) -> dict[str, Any]:
     """Inspect both independent-duration coverage and fair matched endpoints."""
     from preprocess.preprocess_kfall import load_kfall_3class
+    from train_kfall import label_config
 
     recordings, _, records, skipped = load_kfall_3class(args.dataset_root, label_dir=args.label_dir)
     partition = subject_split_indices([record["subject"] for record in records], args.split, args.seed)
+    if getattr(args, "label_policy", "legacy") == "spikes":
+        from loaders.kfall_event_loader import annotate_record_labels
+        annotate_record_labels(recordings, records, _loader_config(experiments[0], args), verbose=True)
     rows = []
     for experiment in experiments:
         cfg = _loader_config(experiment, args)
@@ -172,6 +176,7 @@ def inspect_dataset(args: argparse.Namespace, experiments: Sequence[WindowExperi
     return {
         "dataset": "kfall", "seed": args.seed, "split": list(args.split),
         "dataset_root": str(Path(args.dataset_root).resolve()), "recordings": len(records), "skipped": skipped,
+        "labeling_config": label_config(args),
         "endpoint_policy": args.endpoint_policy, "event_length_policy": args.event_length_policy,
         "classes": {str(label): name for label, name in CLASS_NAMES.items()
                     if label < (4 if args.post_impact_seconds > 0 else 3)},

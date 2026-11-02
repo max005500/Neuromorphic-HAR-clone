@@ -55,7 +55,8 @@ def _subjects(metadata: dict[str, Any]) -> dict[str, list[str]]:
 def _check_manifest_row(store: KFallWindowStore, row: dict[str, Any]) -> None:
     for name in ("raw_win", "out_win", "stride", "resample_hz", "post_impact_seconds", "endpoint_context",
                  "label_policy", "adl_margin_seconds", "pre_fall_seconds", "post_recovery_seconds",
-                 "motion_window_seconds", "motion_acc_threshold", "motion_gyr_threshold"):
+                 "motion_window_seconds", "motion_acc_threshold", "motion_gyr_threshold",
+                 "spike_min_duration_seconds", "spike_max_gap_seconds", "spike_label_hz"):
         if name in row and row[name] != getattr(store.cfg, name):
             raise ValueError(f"Comparison manifest {name} differs from cache {store.cache_dir.name}.")
     if "duration_seconds" in row and not np.isclose(

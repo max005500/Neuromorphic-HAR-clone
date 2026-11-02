@@ -24,7 +24,8 @@ from preprocess.kfall_resampling import resample_kfall_signal, validate_resample
 from preprocess.preprocess_kfall import load_kfall_3class
 from preprocess.utils import subject_split_indices
 from preprocess.kfall_labels import (class_names, label_policy_kwargs, record_frame_labels,
-                                     record_frames, label_manifest, LABEL_POLICY_DEFAULTS)
+                                     record_frames, label_manifest, LABEL_POLICY_DEFAULTS, SPIKE_LABEL_DEFAULTS,
+                                     spike_encoder_kwargs)
 
 SPLIT_NAMES = ("train", "val", "test")
 ARRAY_KEYS = (
@@ -61,6 +62,9 @@ class KFallEventLoaderConfig:
     motion_window_seconds: float = 0.25
     motion_acc_threshold: float = 0.08
     motion_gyr_threshold: float = 10.0
+    spike_min_duration_seconds: float = .30
+    spike_max_gap_seconds: float = .10
+    spike_label_hz: float = 200.0
 
     def __post_init__(self) -> None:
         if self.raw_win < 2 or self.out_win < 2 or self.stride < 1:
@@ -73,8 +77,14 @@ class KFallEventLoaderConfig:
         if not np.isfinite(self.sample_rate_hz) or self.sample_rate_hz != 100.0:
             raise ValueError("KFall frame annotations use a 100 Hz sample rate.")
         validate_resample_hz(self.resample_hz, self.sample_rate_hz)
-        if self.label_policy not in {"legacy", "temporal", "motion"}:
-            raise ValueError("label_policy must be legacy, temporal or motion.")
+        if self.label_policy not in {"legacy", "temporal", "motion", "spikes"}:
+            raise ValueError("label_policy must be legacy, temporal, motion or spikes.")
+        validate_resample_hz(self.spike_label_hz, self.sample_rate_hz)
+        if self.spike_label_hz is None:
+            raise ValueError("spike_label_hz must be at least 100 Hz.")
+        if (not np.isfinite(self.spike_min_duration_seconds) or self.spike_min_duration_seconds < 0
+                or not np.isfinite(self.spike_max_gap_seconds) or self.spike_max_gap_seconds <= 0):
+            raise ValueError("Spike duration must be nonnegative and maximum gap positive.")
         for key in ("adl_margin_seconds", "pre_fall_seconds", "post_recovery_seconds", "motion_window_seconds"):
             value = getattr(self, key) * self.sample_rate_hz
             if not np.isfinite(value) or value < 0 or not np.isclose(value, round(value), rtol=0, atol=1e-8):
@@ -127,7 +137,7 @@ def window_targets_for_record(
         signal = record if record.shape == (length, 6) and "frame_label_intervals" not in meta else None
         targets = record_frame_labels(frames, meta, signal=signal,
             post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
-            fall_policy=cfg.fall_policy, **label_policy_kwargs(cfg))
+            fall_policy=cfg.fall_policy, **label_policy_kwargs(cfg), **spike_encoder_kwargs(cfg))
         if int(meta["label_id"]) == 0:
             for label in (0, 3):
                 eligible = np.flatnonzero(targets == label)
@@ -319,12 +329,15 @@ def load_or_build_kfall_event_splits(
     if not run_name or Path(run_name).name != run_name or run_name in {".", ".."}:
         raise ValueError("run_name must be a simple cache name.")
     expected = {
-        "version": 4 if label_policy_kwargs(cfg) != LABEL_POLICY_DEFAULTS else 3 if cfg.resample_hz is not None else
+        "version": 5 if cfg.label_policy == "spikes" else 4 if label_policy_kwargs(cfg) != LABEL_POLICY_DEFAULTS else 3 if cfg.resample_hz is not None else
                    2 if cfg.post_impact_seconds > 0 or cfg.endpoint_context is not None else 1,
         "dataset": "kfall", "split_strategy": "subject",
         "dataset_root": str(root.resolve()), "label_dir": str(labels_root.resolve()),
         "config": asdict(cfg), "source_signature": _source_signature(root, labels_root),
     }
+    if cfg.label_policy != "spikes":
+        for key in SPIKE_LABEL_DEFAULTS:
+            expected["config"].pop(key)
     if label_policy_kwargs(cfg) == LABEL_POLICY_DEFAULTS:
         # Adding label policies must not invalidate existing model/cache snapshots.
         for key in LABEL_POLICY_DEFAULTS:
@@ -344,12 +357,7 @@ def load_or_build_kfall_event_splits(
         return load_event_splits(output, mmap_mode, verbose), u.load_json(output / "metadata.json")
 
     recordings, labels, records, skipped = load_kfall_3class(root, label_dir=labels_root)
-    if cfg.label_policy != "legacy":
-        for signal, record in zip(recordings, records):
-            targets = record_frame_labels(record["frames"], record, signal=signal,
-                post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
-                fall_policy=cfg.fall_policy, **label_policy_kwargs(cfg))
-            record.update(label_manifest(record["frames"], targets))
+    annotate_record_labels(recordings, records, cfg, verbose=verbose)
     if cfg.post_impact_seconds > 0:
         for record in records:
             if record["label_id"] == 0:
@@ -387,6 +395,8 @@ def load_or_build_kfall_event_splits(
             "adl_rule": "Dynamic on [first_frame + margin, last_frame + 1 - margin); otherwise Static",
             "fall_rule": "Dynamic before onset and after postimpact; all other unprotected frames Static",
             "motion_rule": "Optional trailing per-axis ranges replace Dynamic/Static only; fixed heuristic thresholds",
+            "spike_rule": "Accelerometer-only whole-record Sigma-Delta; unprotected clusters spanning > min duration are Dynamic; otherwise Static",
+            "spike_labeling_is_offline": cfg.label_policy == "spikes",
             "native_sample_rate_hz": cfg.sample_rate_hz,
         }
     if expected["version"] >= 2:
@@ -411,3 +421,18 @@ def load_or_build_kfall_event_splits(
             u.safe_rmtree(output)
         temporary_root.rename(output)
     return load_event_splits(output, mmap_mode, verbose), metadata
+
+
+def annotate_record_labels(recordings, records, cfg, *, verbose=False):
+    """Materialize full-record labels once, before choosing window durations."""
+    if cfg.label_policy == "legacy":
+        return
+    for index, (signal, record) in enumerate(zip(recordings, records), 1):
+        if cfg.label_policy == "spikes":
+            record["spike_label_sensor"] = "acc"
+        targets = record_frame_labels(record["frames"], record, signal=signal,
+            post_impact_seconds=cfg.post_impact_seconds, sample_rate_hz=cfg.sample_rate_hz,
+            fall_policy=cfg.fall_policy, **label_policy_kwargs(cfg), **spike_encoder_kwargs(cfg))
+        record.update(label_manifest(record["frames"], targets))
+        if verbose and cfg.label_policy == "spikes" and index % 500 == 0:
+            print(f"[kfall:labels] {index}/{len(records)} full recordings", flush=True)

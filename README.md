@@ -832,3 +832,48 @@ El JSON incluye los conteos de `aten::item` y `aten::_local_scalar_dense`; el tr
 permite inspeccionar operaciones CUDA, sincronizaciones y tiempos de CPU en un
 visor compatible con Chrome Trace. El optimizador puede mantener algunas
 operaciones escalares propias incluso después de optimizar las neuronas.
+
+### Etiquetas por grupos de spikes en la grabación completa
+
+El modo `--label-policy spikes` sustituye los márgenes temporales de
+Dynamic/Static por actividad Sigma-Delta. Primero lee cada grabación completa,
+interpola a una **rejilla fija de etiquetas de 200 Hz** y codifica sus seis
+canales con `theta`, `dead-zone` y `sd-init` configurados. El estado del encoder
+se inicializa una sola vez por grabación, sin reiniciarse en cada ventana.
+
+Para etiquetar se agrupan **solo eventos ON/OFF de AccX, AccY y AccZ** cuando la separación
+entre eventos consecutivos es de **hasta 0.10 s**. Un grupo es Dynamic si el tiempo
+desde su primer hasta su último evento es **estrictamente mayor que 0.30 s**.
+Los huecos internos de hasta 0.10 s forman parte del grupo Dynamic. El resto es
+Static: incluye tramos sin spikes y también spikes aislados o grupos breves.
+Fall y Postimpact conservan sus intervalos oficiales/derivados y separan los
+grupos: los spikes dentro de ellos no contribuyen a decidir Dynamic.
+
+Estas son **pseudoetiquetas offline**: detectar un grupo puede utilizar eventos
+posteriores para etiquetar su comienzo. Esa información solo construye el target,
+no entra como señal futura en la entrada del modelo. Cada ventana sigue tomando
+la etiqueta de su último sample. Los intervalos se guardan antes de segmentar,
+por lo que las duraciones de ventana comparten la misma referencia con igual
+encoder y parámetros de etiquetado. Cambiar `theta` puede cambiar las etiquetas;
+no deben interpretarse como ground truth independiente al calibrar el encoder.
+Los modos `temporal`, `motion` y `legacy` siguen disponibles.
+
+Generar el dataset de 1 segundo sin entrenar:
+
+```bash
+python train_kfall.py --preprocess-only \
+  --window-seconds 1.00 --resample-hz 200 --endpoint-context 410 \
+  --theta-file configs/kfall_theta_200hz.json \
+  --label-policy spikes --spike-label-hz 200 \
+  --spike-min-duration-seconds 0.30 --spike-max-gap-seconds 0.10 \
+  --post-impact-seconds 1.20 --workers 0
+```
+
+Para entrenar, elimina `--preprocess-only` y añade
+`--epochs 100 --batch-size 128 --workers 4 --device auto --run kfall_1s_spikes`.
+La caché tiene identidad separada; el visor usa las etiquetas guardadas en ella.
+Los modelos anteriores siguen asociados a sus etiquetas originales.
+
+El giroscopio continúa siendo entrada del modelo, pero sus spikes no intervienen
+en las nuevas etiquetas Dynamic/Static. Las cachés nuevas identifican esta regla
+con sensor `acc` y versión 5, separadas de las anteriores de seis canales.
