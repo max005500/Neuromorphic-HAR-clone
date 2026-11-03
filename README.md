@@ -877,3 +877,66 @@ Los modelos anteriores siguen asociados a sus etiquetas originales.
 El giroscopio continúa siendo entrada del modelo, pero sus spikes no intervienen
 en las nuevas etiquetas Dynamic/Static. Las cachés nuevas identifican esta regla
 con sensor `acc` y versión 5, separadas de las anteriores de seis canales.
+
+### Ajustar visualmente el giroscopio de KFall
+
+`tune_kfall_gyro.py` permite modificar por separado los umbrales Sigma-Delta de
+**GyrX, GyrY y GyrZ**, manteniendo fijos los tres del acelerómetro. Parte de la
+configuración real de una caché o de un entrenamiento; no asume los umbrales ni
+las unidades de SisFall. KFall mantiene el giroscopio en **grados por segundo**.
+
+```bash
+python tune_kfall_gyro.py \
+  --run-dir runs/NOMBRE_DEL_ENTRENAMIENTO \
+  --output configs/kfall_theta_gyro_custom.json
+```
+
+También puede abrirse directamente una caché ya generada:
+
+```bash
+python tune_kfall_gyro.py \
+  --cache-dir data/kfall_cache/NOMBRE_DE_LA_CACHE \
+  --output configs/kfall_theta_gyro_custom.json
+```
+
+La ventana presenta los tres ejes con señal original/interpolada, reconstrucción
+actual y reconstrucción base discontinua, pulsos ON/OFF, conteos y RMSE por eje.
+Los deslizadores son logarítmicos; las casillas permiten escribir el valor exacto
+en °/s. «Vincular XYZ» aplica el mismo valor a los tres ejes. «Restaurar θ» vuelve
+a los umbrales originales de la caché. Conserva la navegación por ventanas,
+clases, sujetos y particiones; empieza en **train**. Revisar distintas actividades
+y validation ayuda a evitar escoger un umbral por una sola señal; test se reserva
+para la evaluación final.
+
+En este encoder, **θ es el paso de reconstrucción** y el límite para disparar es
+`dead-zone × θ`. El ajuste conserva `dead-zone`, inicialización, offsets,
+interpolación y longitud de eventos de la caché. Se cambia el encoder, no la
+calibración física del sensor. No se reescriben eventos ni etiquetas originales.
+
+«Guardar theta JSON» exporta los seis valores con el acelerómetro intacto. Se
+puede reabrir con `--theta-file configs/kfall_theta_gyro_custom.json`; se rechaza
+un archivo que cambie los umbrales del acelerómetro de esa caché. El ajuste es
+manual y exploratorio: el RMSE no demuestra una mejora de clasificación.
+
+Para emplearlo en un nuevo entrenamiento, sustituye el archivo anterior por:
+
+```bash
+--theta-file configs/kfall_theta_gyro_custom.json
+```
+
+Mantén los demás parámetros de tu entrenamiento: `--theta-file` carga únicamente
+los seis valores. Se genera una caché compatible con la nueva codificación y se
+requiere entrenar el modelo con esas entradas. Las etiquetas basadas solo en
+spikes del acelerómetro conservan su criterio.
+
+Opciones útiles: `--gyro-theta 1.25 2.5 5` para iniciar una vista previa,
+`--class dynamic`, `--subject SA06`, `--window 10`, `--dataset-root data/KFall`
+y `--theta-min 0.001 --theta-max 1000` para el rango. Para exportar sin escritorio:
+
+```bash
+python tune_kfall_gyro.py --cache-dir data/kfall_cache/NOMBRE_DE_LA_CACHE \
+  --gyro-theta 1.25 2.5 5 --save results/kfall_gyro_tuner/preview.png \
+  --output configs/kfall_theta_gyro_custom.json
+```
+
+En ese modo se guardan tanto la imagen como el JSON.

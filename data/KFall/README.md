@@ -168,3 +168,18 @@ A cluster may retroactively label its beginning; model inputs remain causal.
 Changing encoder thresholds can change these pseudo-labels. Keep encoder/label
 settings fixed for window comparisons; they are not independent ground truth
 for threshold optimization. The main README includes the preparation command.
+
+### Interactive gyroscope encoder thresholds
+
+From the repository root run `python tune_kfall_gyro.py --cache-dir CACHE` (or
+`--run-dir TRAINING_RUN`). This Matplotlib tool adjusts GyrX/GyrY/GyrZ theta in
+**degrees/s**, shows measured signals, baseline/current reconstruction and ON/OFF
+events, and reports per-axis RMSE/counts. Accelerometer thresholds remain fixed.
+Log sliders, exact numeric inputs, linked axes and JSON export are available.
+Start with train, review validation, and reserve test for final evaluation.
+
+The exported `configs/kfall_theta_gyro_custom.json` works with `--theta-file` in
+training/comparison. Preserve the remaining encoder settings; theta-file loads
+only the six thresholds. Existing caches are not modified. See the main README
+for commands and the distinction between theta reconstruction step and
+`dead-zone * theta` event trigger.
