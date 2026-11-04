@@ -953,3 +953,16 @@ Las métricas y curvas distinguen raíz, ramas condicionales y resultado final d
 cuatro clases. La evaluación y los reproductores cargan cada checkpoint con su
 arquitectura guardada. Consulta [el experimento](experiments/hierarchy/README.md)
 para entrenar, revisar resultados y recuperar la copia de seguridad previa.
+
+### Experimento temporal: SCN con memoria LIF recurrente
+
+`train_kfall_temporal.py` añade memoria SNN entre ventanas de una misma grabación,
+con 32 o 64 LIF recurrentes y reinicio explícito entre episodios. Es un experimento
+separado: el entrenamiento original sigue en `train_kfall.py`. Las pérdidas de
+transición y de límites se activan individualmente; sus estadísticas se calculan
+solo con train. Incluye comparación de ablaciones, métricas por episodio y visor.
+
+Consulta [el protocolo y los comandos](experiments/recurrent_snn/README.md).
+KFall conserva sus **100 Hz originales** para `stride`: 10 muestras son 0.10 s;
+la interpolación a 200 Hz no cambia ese intervalo. En el nuevo entrenador,
+batch-size cuenta grabaciones paralelas y K define el truncamiento de gradiente.

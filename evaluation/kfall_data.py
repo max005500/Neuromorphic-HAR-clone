@@ -126,14 +126,17 @@ def _validate_partition_metadata(metadata: dict[str, Any]) -> None:
 
 def load_evaluation_data(
     run_dir: str | Path, checkpoint_config: dict[str, Any], cache_dir: str | Path | None = None,
+    *, split_name: str = "test",
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any], Path]:
     """Return the original held-out test arrays after checking training provenance.
 
-    Only the test arrays are mapped, all read-only. Metadata from the run is
+    Only the selected split arrays are mapped, all read-only (test by default). Metadata from the run is
     required so an overwritten cache cannot silently change the evaluation.
     No source CSV, workbook, raw preprocessing, or train/validation arrays are
     accessed. Source signatures are compared to the saved training snapshot.
     """
+    if split_name not in SPLIT_NAMES:
+        raise ValueError("Unknown evaluation split.")
     run_dir = Path(run_dir).expanduser().resolve()
     run_metadata = _read_metadata(run_dir / "dataset_metadata.json")
     resolved_cache = _resolve_cache(checkpoint_config, cache_dir)
@@ -183,7 +186,7 @@ def load_evaluation_data(
         raise ValueError("Checkpoint class count differs from the training dataset class scheme.")
     arrays = {}
     for key in ARRAY_KEYS:
-        path = resolved_cache / "test" / f"{key}.npy"
+        path = resolved_cache / split_name / f"{key}.npy"
         if not path.is_file():
             raise FileNotFoundError(f"Original test cache is incomplete: {path}. Evaluation will not rebuild it.")
         arrays[key] = np.load(path, mmap_mode="r", allow_pickle=False)
@@ -214,7 +217,7 @@ def load_evaluation_data(
             raise ValueError("Test x_ev contains invalid or simultaneous ON/OFF events.")
     expected_files, expected_starts, expected_targets = [], [], []
     records = run_metadata["recordings"]
-    for index in run_metadata["split_file_indices"]["test"]:
+    for index in run_metadata["split_file_indices"][split_name]:
         record = records[index]
         starts, targets = window_targets_for_record(np.empty((int(record["T"]), 0)), record, cfg)
         expected_files.extend([index] * len(starts))
@@ -224,9 +227,9 @@ def load_evaluation_data(
         raise ValueError("Test window file/start manifest differs from the original training protocol.")
     if not np.array_equal(arrays["y_h1"], expected_targets):
         raise ValueError("Test window activity labels differ from the original temporal labeling protocol.")
-    if count != run_metadata["split_summary"]["test"].get("windows"):
+    if count != run_metadata["split_summary"][split_name].get("windows"):
         raise ValueError("Test window count differs from the training snapshot.")
-    if set(np.unique(arrays["subject"]).tolist()) != set(run_metadata["split_subjects"]["test"]):
+    if set(np.unique(arrays["subject"]).tolist()) != set(run_metadata["split_subjects"][split_name]):
         raise ValueError("Test window subjects differ from the training snapshot.")
     for index in np.unique(arrays["file_idx"]):
         record = records[int(index)]
@@ -264,6 +267,6 @@ def load_evaluation_data(
             if not np.isnan(arrays["lead_time_ms"][mask]).all():
                 raise ValueError("Non-fall test windows must not have an annotated impact lead time.")
     counts = {str(label): int(np.sum(arrays["y_h1"] == label)) for label in np.unique(arrays["y_h1"])}
-    if counts != run_metadata["split_summary"]["test"].get("class_counts"):
+    if counts != run_metadata["split_summary"][split_name].get("class_counts"):
         raise ValueError("Test class counts differ from the training snapshot.")
     return arrays, cache_metadata, run_metadata, resolved_cache

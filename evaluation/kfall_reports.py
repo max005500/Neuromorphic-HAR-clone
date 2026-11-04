@@ -147,7 +147,7 @@ def save_evaluation_reports(
         if truth[position] in (0, 3) and "lead_time_ms" in split:
             lead_time = _strict_values(float(split["lead_time_ms"][index]))
         csv_rows.append({
-            "window_index": index, "split": "test", "subject": subject,
+            "window_index": index, "split": summary.get("split", "test"), "subject": subject,
             "file": str(record["file"]), "code": record["code"], "trial": record["trial"],
             "start": int(split["start"][index]), "end_frame": int(split["end_frame"][index]),
             "true_class_id": int(truth[position]), "true_class": names[truth[position]],

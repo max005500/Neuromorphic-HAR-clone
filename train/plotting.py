@@ -74,6 +74,9 @@ def save_training_curves(
             ('hierarchy_loss', [('loss_group', 'Root loss'),
                 ('loss_normal', 'Normal branch contribution'), ('loss_event', 'Event branch contribution')]),
         ])
+    if has_values('loss_ce'):
+        figures.append(('temporal_loss', [('loss_ce', 'Classification'),
+            ('loss_transition', 'Raw transition penalty'), ('loss_boundary', 'Raw boundary penalty')]))
     for name, panels in figures:
         figure = Figure(figsize=(6.5 * len(panels), 4.5), layout="constrained", facecolor="white")
         FigureCanvasAgg(figure)

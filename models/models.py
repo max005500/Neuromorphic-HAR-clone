@@ -307,6 +307,10 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         outputs = self._spiking_heads_forward(h_fused) if self.spiking_heads else self._dense_heads_forward(rep_fused)
         return outputs, rep_fused
 
+    def extract_features(self, x: torch.Tensor, offset: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Fused event/offset features for one window; LIF states reset per call."""
+        return self._fused_representation(x, offset)[1]
+
 
 class SingleHeadSCN(DualHeadSCN):
     """Single-head SCN variant for datasets with one activity classifier."""

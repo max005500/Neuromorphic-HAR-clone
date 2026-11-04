@@ -55,6 +55,8 @@ def _load_checkpoint(path: Path) -> tuple[dict[str, Any], SimpleNamespace]:
     if not isinstance(checkpoint.get("model_state_dict"), dict):
         raise ValueError("Checkpoint has no model_state_dict.")
     cfg = SimpleNamespace(**checkpoint["config"])
+    if getattr(cfg, "model_type", None) == "temporal_scn":
+        raise ValueError("Temporal checkpoint: use evaluate_kfall_temporal.py or animate_kfall_temporal.py to retain episode memory.")
     if getattr(cfg, "dataset", None) != "kfall" or getattr(cfg, "n_classes", None) not in {3, 4}:
         raise ValueError("Use a KFall checkpoint trained with three or four activity classes.")
     if getattr(cfg, "head_mode", None) not in {"single", "dual", "hierarchical"}:
