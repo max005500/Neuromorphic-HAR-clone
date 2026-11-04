@@ -92,12 +92,15 @@ def run_temporal_epoch(model, episodes, cfg, device, stats, *, optimizer=None, s
         for group_number, group in enumerate(groups, 1):
             state = previous_probability = None  # reset between independent recordings
             for chunk in episodes.chunks(group, cfg.sequence_length):
+                # No supervision means no optimizer update, including Adam's
+                # momentum/weight decay. Still advance the recurrent state.
+                supervised = bool(chunk['valid'].any())
                 events = chunk['events'].to(device, non_blocking=True)
                 offsets = chunk['offsets'].to(device, non_blocking=True)
                 target, valid = (chunk[key].to(device) for key in ('targets', 'valid'))
                 if optimizer is not None:
                     optimizer.zero_grad(set_to_none=True)
-                with torch.set_grad_enabled(optimizer is not None), make_autocast(bool(cfg.amp and device.type == 'cuda')):
+                with torch.set_grad_enabled(optimizer is not None and supervised), make_autocast(bool(cfg.amp and device.type == 'cuda')):
                     outputs, state = model(events, offsets, state, valid=chunk['present'])
                     loss, parts = temporal_loss(outputs, target, valid,
                         chunk['previous_target'].to(device), chunk['previous_valid'].to(device), costs=costs,
@@ -105,7 +108,7 @@ def run_temporal_epoch(model, episodes, cfg, device, stats, *, optimizer=None, s
                         previous_probability=previous_probability,
                         lambda_transition=cfg.lambda_transition, lambda_boundary=cfg.lambda_boundary,
                         label_smoothing=cfg.label_smoothing)
-                    if optimizer is not None:
+                    if optimizer is not None and supervised:
                         scaler.scale(loss).backward()
                         if cfg.grad_clip > 0:
                             scaler.unscale_(optimizer)

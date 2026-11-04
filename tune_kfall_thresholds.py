@@ -115,7 +115,7 @@ def _identity(config: dict[str, Any]) -> str:
 def search_settings(args: argparse.Namespace) -> dict[str, Any]:
     """Include every training-affecting search option in the experiment identity."""
     from train_kfall import label_config
-    return {
+    settings = {
         "dataset_root": str(args.dataset_root.resolve()),
         "label_dir": str((args.label_dir or args.dataset_root / "label_data").resolve()),
         "raw_win": window_samples(args.window_seconds),
@@ -129,6 +129,11 @@ def search_settings(args: argparse.Namespace) -> dict[str, Any]:
         "workers": args.workers, "device": args.device, "gpu": args.gpu,
         **label_config(args),
     }
+    if settings["label_policy"] == "spikes":
+        # The original spike labels used all six IMU channels. Keep their runs
+        # separate from the current accelerometer-only labels.
+        settings["spike_label_sensor"] = "acc"
+    return settings
 
 
 def candidate_name(candidate: ThresholdCandidate, settings: dict[str, Any]) -> str:
@@ -211,6 +216,12 @@ def collect_candidate(
     name = candidate_name(candidate, search_settings(args))
     cache = args.cache_dir.resolve() / f"kfall_event_loader_{name}"
     cached_metadata = json.loads((cache / "metadata.json").read_text())
+    if args.label_policy == "spikes":
+        for provenance in (metadata, cached_metadata):
+            recordings = provenance.get("recordings", [])
+            if (provenance.get("version") != 5 or not recordings
+                    or any(record.get("spike_label_sensor") != "acc" for record in recordings)):
+                raise ValueError("Candidate spike labels do not use the current accelerometer-only policy.")
     for key in ("source_signature", "split_subjects", "config"):
         if cached_metadata[key] != metadata[key]:
             raise ValueError(f"Candidate cache provenance differs in {key}.")
@@ -222,7 +233,12 @@ def collect_candidate(
         fall_policy="pre_impact", resample_hz=args.resample_hz,
         **label_config(args),
     )
-    normalized_metadata = {**LABEL_CONFIG_DEFAULTS, **metadata["config"]}
+    omitted_defaults = dict(LABEL_CONFIG_DEFAULTS)
+    if loader_cfg.label_policy != "spikes":
+        # Non-spike caches intentionally omit these newly introduced fields.
+        from preprocess.kfall_labels import SPIKE_LABEL_DEFAULTS
+        omitted_defaults.update(SPIKE_LABEL_DEFAULTS)
+    normalized_metadata = {**omitted_defaults, **metadata["config"]}
     if normalized_metadata != json.loads(json.dumps(asdict(loader_cfg))):
         raise ValueError("Candidate cache has different encoder settings.")
     truth = np.load(run / "metrics/y_true_val.npy", allow_pickle=False)

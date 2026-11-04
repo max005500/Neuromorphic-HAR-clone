@@ -64,21 +64,29 @@ class TemporalSCN(nn.Module):
             raise ValueError('Sequence validity mask must have shape [B,K].')
         history, activity = [], []
         for time in range(steps):
-            indices = torch.nonzero(valid[:, time], as_tuple=False).flatten().to(events.device)
-            features = events.new_zeros((batch, self.backbone.fused_dim), dtype=torch.float32)
-            if len(indices):
-                current = self.backbone.extract_features(events[indices, time].float(), offsets[indices, time])
-                features = features.to(current.dtype).index_copy(0, indices, current)
+            fully_present = bool(valid[:, time].all())  # CPU-only length mask
+            if fully_present:
+                # Most chunks have no padding: avoid a tiny H2D index transfer,
+                # gather and scatter for every temporal position.
+                features = self.backbone.extract_features(events[:, time].float(), offsets[:, time])
+            else:
+                indices = torch.nonzero(valid[:, time], as_tuple=False).flatten().to(events.device)
+                features = events.new_zeros((batch, self.backbone.fused_dim), dtype=torch.float32)
+                if len(indices):
+                    current = self.backbone.extract_features(events[indices, time].float(), offsets[indices, time])
+                    features = features.to(current.dtype).index_copy(0, indices, current)
             if self.memory is not None:
                 spikes, candidate = self.memory(features, state)
-                if state is None:
-                    previous = tuple(torch.zeros_like(value) for value in candidate)
+                if fully_present:
+                    state = candidate
+                    activity.append(state[1].sum(1))
                 else:
-                    previous = state
-                mask = valid[:, time].to(events.device).unsqueeze(1)
-                state = tuple(torch.where(mask, new, old) for new, old in zip(candidate, previous))
+                    previous = (tuple(torch.zeros_like(value) for value in candidate)
+                                if state is None else state)
+                    mask = valid[:, time].to(events.device).unsqueeze(1)
+                    state = tuple(torch.where(mask, new, old) for new, old in zip(candidate, previous))
+                    activity.append((state[1] * mask).sum(1))
                 representation = state[1]
-                activity.append((representation * mask).sum(1))
             else:
                 representation = features
             history.append(representation)

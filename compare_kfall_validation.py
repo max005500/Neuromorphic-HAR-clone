@@ -18,10 +18,16 @@ def read_validation(run):
     predicted = np.load(run / 'metrics/y_pred_val.npy', allow_pickle=False)
     index_file = run / 'metrics/validation/window_indices.npy'
     indices = np.load(index_file, allow_pickle=False) if index_file.exists() else np.arange(len(truth))
-    if truth.shape != predicted.shape or not np.array_equal(truth, arrays['y_h1'][indices]):
+    if (indices.ndim != 1 or indices.dtype.kind not in 'iu' or len(indices) != len(truth)
+            or np.any(indices < 0) or np.any(indices >= len(arrays['y_h1']))
+            or len(np.unique(indices)) != len(indices)):
+        raise ValueError('Validation indices must be unique, in-range one-dimensional integers.')
+    if truth.ndim != 1 or not len(truth) or truth.shape != predicted.shape or not np.array_equal(truth, arrays['y_h1'][indices]):
         raise ValueError('Validation predictions do not match the saved validation cache.')
     if not np.isin(predicted, [0, 1, 2, 3]).all() or not np.any(truth == 0):
         raise ValueError('Four-class predictions with annotated Fall examples are required.')
+    order = np.argsort(indices)
+    indices, truth, predicted = indices[order], truth[order], predicted[order]
     cohort = np.column_stack((arrays['file_idx'][indices], arrays['end_frame'][indices], truth))
     return dict(run_dir=str(run.resolve()), config=config, metadata=metadata, cohort=cohort,
         cohort_sha256=hashlib.sha256(cohort.astype('<i8').tobytes()).hexdigest(),

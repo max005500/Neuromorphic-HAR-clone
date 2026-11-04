@@ -50,6 +50,8 @@ class EpisodeSet:
             self.episodes.append(Episode(int(fi), indices, targets, valid, frames))
         if not self.episodes:
             raise ValueError('No complete episodes remain after selecting uniform endpoints.')
+        if not any(ep.valid.any() for ep in self.episodes):
+            raise ValueError('No supervised windows remain; reduce boundary_ignore_seconds or review the labels.')
 
     @property
     def window_count(self):

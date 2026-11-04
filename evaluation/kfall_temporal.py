@@ -7,13 +7,23 @@ from types import SimpleNamespace
 import time
 import numpy as np
 import torch
-from evaluation.kfall_data import load_evaluation_data
+from evaluation.kfall_data import load_evaluation_data, _data_config, _record_identity
 from evaluation.kfall_reports import save_evaluation_reports
 from loaders.kfall_sequences import EpisodeSet
 from loaders.kfall_event_loader import ARRAY_KEYS
 from train.temporal import run_temporal_epoch
 from train.utils import count_parameters
 from preprocess.utils import save_json
+
+
+def data_provenance_sha256(metadata):
+    """Small comparison key for data identity, independent of model/runtime."""
+    manifest = {key: metadata[key] for key in (
+        'version', 'dataset', 'source_signature', 'split_subjects', 'split_file_indices',
+        'channels', 'units', 'fall_label_rule')}
+    manifest['config'] = _data_config(metadata)
+    manifest['recordings'] = [_record_identity(record) for record in metadata['recordings']]
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def load_temporal_run(run_dir, device='auto', cache_dir=None, *, split_name='test'):
@@ -161,6 +171,7 @@ def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=No
         'timing_scope': 'Amortized batched PyTorch wall time, not single-stream hardware latency or energy.',
         'mean_recurrent_spikes_per_window': float(p['memory_spikes'].mean()),
         'cohort_sha256': hashlib.sha256(cohort.astype('<i8').tobytes()).hexdigest(),
+        'data_provenance_sha256': data_provenance_sha256(metadata),
         'observed_windows': len(p['indices']), 'masked_windows': int((~keep).sum()),
         'state_reset': 'recording boundaries; gradients detached every K windows during train',
         'decision_rule': 'root then selected branch' if cfg.head_mode == 'hierarchical' else 'four-class argmax',

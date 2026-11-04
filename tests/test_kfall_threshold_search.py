@@ -64,6 +64,14 @@ class ThresholdSearchTests(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 self.assertNotEqual(initial, candidate_name(candidate, search_settings(parser.parse_args(arguments))))
 
+    def test_accelerometer_spike_policy_has_a_separate_candidate_identity(self):
+        candidate = build_candidates()[0]
+        settings = search_settings(build_parser().parse_args(["--label-policy", "spikes"]))
+        self.assertEqual(settings["spike_label_sensor"], "acc")
+        old_settings = {key: value for key, value in settings.items() if key != "spike_label_sensor"}
+        self.assertNotEqual(candidate_name(candidate, settings), candidate_name(candidate, old_settings))
+        self.assertNotIn("spike_label_sensor", search_settings(build_parser().parse_args([])))
+
     def test_theta_file_and_explicit_theta_are_mutually_exclusive(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(["--theta-file", "winner.json", "--theta", "1", "1", "1", "1", "1", "1"])
@@ -112,16 +120,16 @@ class ThresholdSearchTests(unittest.TestCase):
                 verify_comparable([result, changed])
 
     @staticmethod
-    def fixture(directory):
+    def fixture(directory, *, label_policy="legacy", real_cache=False):
         import torch
-        from train_kfall import get_args, training_subset_indices
+        from train_kfall import get_args, training_subset_indices, label_config
         from loaders.kfall_event_loader import KFallEventLoaderConfig
 
         args = build_parser().parse_args([
             "--dataset-root", str(directory / "raw"), "--cache-dir", str(directory / "cache"),
             "--out-dir", str(directory / "runs"), "--results-dir", str(directory / "results"),
             "--epochs", "2", "--train-per-class", "1",
-            "--label-policy", "legacy",
+            "--label-policy", label_policy,
         ])
         candidate = build_candidates()[0]
         config = vars(get_args(training_command(args, candidate)[2:]))
@@ -146,9 +154,30 @@ class ThresholdSearchTests(unittest.TestCase):
         (cache / "metadata.json").write_text(json.dumps(metadata))
         np.save(cache / "val/x_ev.npy", np.zeros((4, config["out_win"], 6, 2), dtype=np.uint8))
         truth = np.arange(4)
+        train_labels = truth
+        if real_cache:
+            from loaders.kfall_event_loader import load_or_build_kfall_event_splits
+            from test_kfall_training import write_fixture
+
+            args.dataset_root.mkdir()
+            write_fixture(args.dataset_root)
+            _, metadata = load_or_build_kfall_event_splits(
+                args.dataset_root, cache_dir=args.cache_dir, run_name=name, refresh=True, verbose=False,
+                cfg=KFallEventLoaderConfig(
+                    seed=args.seed, split=tuple(args.split), raw_win=config["raw_win"],
+                    out_win=config["out_win"], stride=args.stride, endpoint_context=args.endpoint_context,
+                    post_impact_seconds=args.post_impact_seconds, theta_sd=candidate.theta,
+                    dead_zone=args.dead_zone, sd_init=args.sd_init, fall_policy="pre_impact",
+                    resample_hz=args.resample_hz, **label_config(args),
+                ),
+            )
+            source = metadata["source_signature"]
+            (run / "dataset_metadata.json").write_text(json.dumps(metadata))
+            truth = np.load(cache / "val/y_h1.npy")
+            train_labels = np.load(cache / "train/y_h1.npy")
         np.save(run / "metrics/y_true_val.npy", truth)
         np.save(run / "metrics/y_pred_val.npy", truth)
-        np.save(run / "training_indices.npy", training_subset_indices(truth, 1, args.seed))
+        np.save(run / "training_indices.npy", training_subset_indices(train_labels, 1, args.seed))
         (run / "metrics/history.json").write_text(json.dumps([{"epoch": 1}, {"epoch": 2}]))
         (run / "metrics/validation_metrics.json").write_text(json.dumps({
             "loss": .5, "best_val_loss": .5, "best_epoch": 1,
@@ -156,6 +185,40 @@ class ThresholdSearchTests(unittest.TestCase):
         torch.save({"config": config, "epoch": 1, "best_val_loss": .5, "model_state_dict": {}},
                    run / "checkpoints/best_model.pt")
         return args, candidate, run, source, cache
+
+    def test_collection_accepts_real_loader_metadata_with_omitted_spike_defaults(self):
+        from preprocess.kfall_labels import SPIKE_LABEL_DEFAULTS
+
+        for policy in ("legacy", "temporal"):
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as temporary:
+                args, candidate, run, source, cache = self.fixture(
+                    Path(temporary), label_policy=policy, real_cache=True,
+                )
+                metadata = json.loads((cache / "metadata.json").read_text())
+                self.assertTrue(all(key not in metadata["config"] for key in SPIKE_LABEL_DEFAULTS))
+                result = collect_candidate(args, candidate, run, source)
+                self.assertEqual(result["validation_accuracy"], 1.)
+                self.assertEqual(result["validation_windows"], len(np.load(cache / "val/y_h1.npy")))
+
+    def test_collection_rejects_previous_six_channel_spike_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args, candidate, run, source, cache = self.fixture(
+                Path(temporary), label_policy="spikes", real_cache=True,
+            )
+            self.assertEqual(collect_candidate(args, candidate, run, source)["validation_accuracy"], 1.)
+            for path in (run / "dataset_metadata.json", cache / "metadata.json"):
+                current = json.loads(path.read_text())
+                for change in ("version", "sensor"):
+                    with self.subTest(path=path.name, change=change):
+                        obsolete = deepcopy(current)
+                        if change == "version":
+                            obsolete["version"] = 4
+                        else:
+                            obsolete["recordings"][0].pop("spike_label_sensor")
+                        path.write_text(json.dumps(obsolete))
+                        with self.assertRaisesRegex(ValueError, "accelerometer-only"):
+                            collect_candidate(args, candidate, run, source, reused=True)
+                        path.write_text(json.dumps(current))
 
     def test_completed_candidate_collects_only_validation_and_detects_test_inference(self):
         with tempfile.TemporaryDirectory() as temporary:

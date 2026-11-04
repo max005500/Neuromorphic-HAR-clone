@@ -10,7 +10,7 @@ from evaluation.kfall_temporal import load_temporal_run
 from loaders.kfall_sequences import EpisodeSet
 from train.temporal import run_temporal_epoch
 from visualization.kfall_data import KFallWindowStore, source_frame_labels
-from visualization.kfall_replay_data import ReplayData, _matches_recording
+from visualization.kfall_replay_data import ReplayData, _matches_recording, _validate_source
 from preprocess.preprocess_kfall import load_record
 
 
@@ -23,20 +23,21 @@ def prepare_temporal_replay(run_dir, *, recording=None, subject=None, device='au
     if not selected:
         raise ValueError('No eligible test recording matches the requested selection.')
     ep = next((ep for ep in selected if metadata['recordings'][ep.file_index]['label_id'] == 0), selected[0])
-    episodes.episodes = [ep]
-    result = run_temporal_epoch(model, episodes, cfg, dev, stats, collect=True)['predictions']
     record = metadata['recordings'][ep.file_index]
     store = KFallWindowStore(cache, dataset_root=dataset_root)
     path = store._record_path(record)
-    raw, frames, _ = load_record(path)
-    # Verify cached encoder/source identity before presenting a prediction trace.
-    for index in ep.indices:
-        store.get_window('test', int(index))
+    raw, frames, source = load_record(path)
+    # Validate cached inputs, then recompute whole-record labels exactly once.
+    # get_window() also recomputes those labels: calling it for every window
+    # would repeatedly encode the complete recording.
+    _validate_source(raw, frames, source, record, ep.file_index, arrays, store.cfg)
+    true = source_frame_labels(raw, frames, record, store.cfg)
+    episodes.episodes = [ep]
+    result = run_temporal_epoch(model, episodes, cfg, dev, stats, collect=True)['predictions']
     times = (frames - frames[0]) / 100
     rows = np.asarray(arrays['start'][result['indices']]) + cfg.raw_win - 1
     onset = (record['fall_onset_frame'] - frames[0]) / 100 if record['label_id'] == 0 else None
     impact = (record['fall_impact_frame'] - frames[0]) / 100 if record['label_id'] == 0 else None
-    true = source_frame_labels(raw, frames, record, store.cfg)
     return ReplayData(record=record, path=path, raw=raw, frames=frames, times=times,
         endpoint_rows=rows, endpoint_times=times[rows], probabilities=result['probability'],
         predicted_classes=result['predicted'], raw_win=cfg.raw_win, out_win=cfg.out_win,

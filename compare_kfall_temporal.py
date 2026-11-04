@@ -34,6 +34,14 @@ def commands(args, remaining):
     return result
 
 
+def validate_comparison_rows(rows):
+    for key, description in (('cohort_sha256', 'validation endpoint/label cohort'),
+                             ('data_provenance_sha256', 'source/encoder/label provenance')):
+        values = [entry.get(key) for entry in rows]
+        if any(not isinstance(value, str) or not value for value in values) or len(set(values)) != 1:
+            raise ValueError(f'Ablation runs do not share the same {description}.')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=['plan', 'train'], default='plan')
@@ -68,15 +76,15 @@ def main(argv=None):
         val = json.loads((run / 'metrics/validation/metrics.json').read_text())
         report = dict(experiment=item['experiment'], sequence_length=item['sequence_length'], run_dir=str(run),
             validation_macro_f1=val['macro_f1'], validation_fall_recall=val['fall_window_metrics']['recall'],
-            validation_accuracy=val['accuracy'], cohort_sha256=val['cohort_sha256'])
+            validation_accuracy=val['accuracy'], cohort_sha256=val['cohort_sha256'],
+            data_provenance_sha256=val['data_provenance_sha256'])
         test = run / 'metrics/test_best/metrics.json'
         if test.exists():
             measured = json.loads(test.read_text())
             report.update(test_accuracy=measured['accuracy'], test_macro_f1=measured['macro_f1'],
                           event_metrics=measured['event_metrics'])
         rows.append(report)
-        if len({entry['cohort_sha256'] for entry in rows}) != 1:
-            raise ValueError('Ablation runs do not use the same validation endpoint/label cohort.')
+        validate_comparison_rows(rows)
         (args.results_dir / 'comparison.json').write_text(json.dumps(rows, indent=2) + '\n')
     import csv
     fields = ['experiment', 'sequence_length', 'validation_accuracy', 'validation_macro_f1',
