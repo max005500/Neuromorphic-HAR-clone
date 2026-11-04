@@ -21,6 +21,16 @@ def get_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument('--architecture', choices=['standard', 'compact'], default='standard',
                         help='compact: channels 16/32/32, kernels 16/16/8, offset 8; explicit flags override this preset.')
+    parser.add_argument('--training-strategy', choices=['joint', 'staged'], default='joint',
+                        help='staged pretrains windows, caches frozen features, then trains temporal memory in FP32.')
+    parser.add_argument('--pretrain-epochs', type=int, default=20)
+    parser.add_argument('--pretrain-batch-size', type=int, default=128, help='Independent windows per pretraining batch.')
+    parser.add_argument('--pretrain-lr', type=float, default=None)
+    parser.add_argument('--feature-batch-size', type=int, default=128)
+    parser.add_argument('--feature-cache-dir', type=Path, help='Defaults to the new run/features directory.')
+    parser.add_argument('--refresh-features', action='store_true')
+    parser.add_argument('--finetune-epochs', type=int, default=0, help='Optional last-convolution + temporal fine-tuning epochs.')
+    parser.add_argument('--finetune-lr', type=float, default=1e-4)
     parser.add_argument('--no-progress', action='store_true', help='Disable tqdm epoch progress bars.')
     parser.add_argument('--memory', choices=['none', 'lif'], default='lif')
     parser.add_argument('--memory-reset', choices=['immediate', 'delayed'], default=None,
@@ -58,6 +68,17 @@ def get_args(argv=None):
             or not 0 <= cfg.memory_tau <= 1 or cfg.memory_threshold <= 0 or cfg.transition_laplace <= 0
             or min(cfg.lambda_transition, cfg.lambda_boundary, cfg.boundary_ignore_seconds) < 0):
         parser.error('Invalid temporal size, loss weights, leak, threshold or masking tolerance.')
+    if (cfg.pretrain_epochs < 1 or cfg.pretrain_batch_size < 1 or cfg.feature_batch_size < 1
+            or cfg.finetune_epochs < 0 or not np.isfinite(cfg.finetune_lr) or cfg.finetune_lr <= 0
+            or (cfg.pretrain_lr is not None and (not np.isfinite(cfg.pretrain_lr) or cfg.pretrain_lr <= 0))):
+        parser.error('Invalid staged training epochs, batch sizes or learning rates.')
+    if cfg.finetune_epochs and cfg.training_strategy != 'staged':
+        parser.error('--finetune-epochs requires --training-strategy staged.')
+    cfg.pretrain_amp = bool(cfg.amp)
+    if cfg.training_strategy == 'staged':
+        # A frozen FP32 feature cache must match the precision of the online
+        # backbone used after training. AMP may still accelerate stage one.
+        cfg.amp = False
     cfg.model_type = 'temporal_scn'
     cfg.temporal_protocol = 'stateful_uniform_episodes_v1'
     return cfg
@@ -108,22 +129,26 @@ def main(argv=None):
           f'{100/cfg.stride:g} decisions/s | batch={cfg.batch_size} recordings | parameters={count_parameters(model)[0]}', flush=True)
     print(f'[architecture] {cfg.architecture} | channels={cfg.conv_ch} | kernels={cfg.kernels} | '
           f'offset={cfg.offset_hidden} | recurrent_reset={cfg.memory_reset}', flush=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
-    scaler = make_grad_scaler(cfg.amp and device.type == 'cuda')
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=cfg.lr_factor,
-        patience=cfg.plateau_patience, min_lr=cfg.min_lr)
-    epoch = 0
-    def runner(dataset, optimizer=None, scaler=None, collect_predictions=False):
-        nonlocal epoch
-        if optimizer is not None:
-            epoch += 1
-        return run_temporal_epoch(model, dataset, cfg, device, stats, optimizer=optimizer, scaler=scaler,
-                                  epoch=epoch, collect=collect_predictions, phase='Train' if optimizer is not None else 'Val')
     checkpoint = run / 'checkpoints/best_model.pt'
-    fit_model(model=model, train_loader=episodes['train'], val_loader=episodes['val'], cfg=cfg,
-        optimizer=optimizer, scheduler=scheduler, scaler=scaler, metrics_dir=run / 'metrics',
-        ckpt_path=checkpoint, run_epoch_fn=runner, format_epoch_fn=format_single_epoch_line,
-        checkpoint_extra_fn=lambda: {'training_statistics': stats})
+    if cfg.training_strategy == 'staged':
+        from train.temporal_staged import fit_staged_temporal
+        fit_staged_temporal(model, episodes, cfg, device, stats, run)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
+        scaler = make_grad_scaler(cfg.amp and device.type == 'cuda')
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=cfg.lr_factor,
+            patience=cfg.plateau_patience, min_lr=cfg.min_lr)
+        epoch = 0
+        def runner(dataset, optimizer=None, scaler=None, collect_predictions=False):
+            nonlocal epoch
+            if optimizer is not None:
+                epoch += 1
+            return run_temporal_epoch(model, dataset, cfg, device, stats, optimizer=optimizer, scaler=scaler,
+                                      epoch=epoch, collect=collect_predictions, phase='Train' if optimizer is not None else 'Val')
+        fit_model(model=model, train_loader=episodes['train'], val_loader=episodes['val'], cfg=cfg,
+            optimizer=optimizer, scheduler=scheduler, scaler=scaler, metrics_dir=run / 'metrics',
+            ckpt_path=checkpoint, run_epoch_fn=runner, format_epoch_fn=format_single_epoch_line,
+            checkpoint_extra_fn=lambda: {'training_statistics': stats})
     saved = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(saved['model_state_dict'], strict=True)
     from evaluation.kfall_temporal import evaluate_temporal

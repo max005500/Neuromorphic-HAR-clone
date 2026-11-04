@@ -7,6 +7,12 @@ experimento jerárquico anterior siguen disponibles. El informe original está e
 La inclusión de la jerarquía no se presupone beneficiosa: se mantiene opcional
 hasta comparar los resultados de validación.
 
+El modo opcional `--training-strategy staged` preentrena la SCN por ventanas y
+después entrena la memoria sobre características guardadas. Consulta
+[staged_training.md](staged_training.md) para usar las dos etapas y el ajuste
+final del último bloque convolucional. El modo predeterminado sigue siendo
+`--training-strategy joint`.
+
 ## Arquitectura y estados
 
 El mismo encoder Sigma-Delta y backbone Conv/BN/LIF/Pool más offsets entregan

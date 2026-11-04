@@ -95,13 +95,20 @@ def run_temporal_epoch(model, episodes, cfg, device, stats, *, optimizer=None, s
                 # No supervision means no optimizer update, including Adam's
                 # momentum/weight decay. Still advance the recurrent state.
                 supervised = bool(chunk['valid'].any())
-                events = chunk['events'].to(device, non_blocking=True)
-                offsets = chunk['offsets'].to(device, non_blocking=True)
+                cached = 'features' in chunk
+                if cached:
+                    features = chunk['features'].to(device, dtype=torch.float32, non_blocking=True)
+                else:
+                    events = chunk['events'].to(device, non_blocking=True)
+                    offsets = chunk['offsets'].to(device, non_blocking=True)
                 target, valid = (chunk[key].to(device) for key in ('targets', 'valid'))
                 if optimizer is not None:
                     optimizer.zero_grad(set_to_none=True)
                 with torch.set_grad_enabled(optimizer is not None and supervised), make_autocast(bool(cfg.amp and device.type == 'cuda')):
-                    outputs, state = model(events, offsets, state, valid=chunk['present'])
+                    if cached:
+                        outputs, state = model.forward_features(features, state, valid=chunk['present'])
+                    else:
+                        outputs, state = model(events, offsets, state, valid=chunk['present'])
                     loss, parts = temporal_loss(outputs, target, valid,
                         chunk['previous_target'].to(device), chunk['previous_valid'].to(device), costs=costs,
                         class_weight=weights, boundary_pos_weight=stats['boundary_pos_weight'],
