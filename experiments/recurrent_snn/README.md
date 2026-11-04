@@ -11,14 +11,24 @@ hasta comparar los resultados de validación.
 
 El mismo encoder Sigma-Delta y backbone Conv/BN/LIF/Pool más offsets entregan
 `conv_channels[-1] + offset_hidden` características por ventana (72 por defecto).
-`extract_features` expone esa representación. La memoria recurrente implementa:
+`extract_features` expone esa representación. El modo estándar conserva el
+reinicio inmediato de los primeros experimentos (`--memory-reset immediate`):
 
 ```text
 corriente = W_input * features + W_recurrent * spikes_previos + bias
 membrana = tau * membrana_previa + corriente
-spike = 1[membrana > umbral]
+spike = 1[membrana >= umbral]
 membrana = membrana - spike * umbral       (soft reset)
 ```
+
+La variante `--architecture compact` utiliza canales `16/32/32`, kernels
+`16/16/8`, offsets de ocho neuronas y memoria LIF de 32 neuronas: **22.156
+parámetros** con salida plana de cuatro clases. Su reinicio recurrente
+predeterminado es diferido (`--memory-reset delayed`), que resta el spike
+anterior antes de calcular el spike actual. El preset y los argumentos resueltos
+quedan guardados en la configuración; los checkpoints anteriores conservan el
+modo inmediato. Consulta [compact_design.md](compact_design.md) para entrenar,
+comparar y evaluar la fusión de BatchNorm y la sensibilidad de pesos a INT8.
 
 También respeta el hard reset si se solicita. Usa el gradiente surrogate del
 repositorio, incluida la optimización que evita lecturas CUDA escalares por

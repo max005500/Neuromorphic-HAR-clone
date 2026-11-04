@@ -10,12 +10,23 @@ from models.hierarchical import hierarchy_predict
 
 
 class RecurrentLIF(nn.Module):
-    def __init__(self, input_size, hidden_size=32, tau=.9, threshold=.5, soft_reset=True):
+    """Explicit membrane/spike state with immediate or previous-spike reset.
+
+    ``immediate`` preserves the original post-spike reset: the stored membrane
+    has already been reset. ``delayed`` stores the pre-reset membrane and uses
+    the previous spike at the next decision. With soft reset this is exactly
+    ``u_t = tau*u_prev + W*x_t + R*s_prev - threshold*s_prev``. Delayed hard
+    reset instead clears the previous membrane before its leak/integration.
+    """
+    def __init__(self, input_size, hidden_size=32, tau=.9, threshold=.5, soft_reset=True,
+                 reset_mode='immediate'):
         super().__init__()
         if hidden_size < 1 or not 0 <= tau <= 1 or threshold <= 0:
             raise ValueError('Invalid recurrent LIF size, leak or threshold.')
+        if reset_mode not in {'immediate', 'delayed'}:
+            raise ValueError('Recurrent reset mode must be immediate or delayed.')
         self.hidden_size, self.tau, self.threshold = hidden_size, float(tau), float(threshold)
-        self.soft_reset = soft_reset
+        self.soft_reset, self.reset_mode = soft_reset, reset_mode
         self.input = nn.Linear(input_size, hidden_size)
         self.recurrent = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.orthogonal_(self.recurrent.weight, gain=.5)
@@ -26,22 +37,33 @@ class RecurrentLIF(nn.Module):
             previous_spikes = torch.zeros_like(membrane)
         else:
             membrane, previous_spikes = state
-        membrane = self.tau * membrane + self.input(features) + self.recurrent(previous_spikes)
+        if self.reset_mode == 'delayed':
+            if self.soft_reset:
+                membrane = (self.tau * membrane + self.input(features)
+                            + self.recurrent(previous_spikes) - self.threshold * previous_spikes)
+            else:
+                membrane = (self.tau * membrane * (1 - previous_spikes)
+                            + self.input(features) + self.recurrent(previous_spikes))
+        else:
+            membrane = self.tau * membrane + self.input(features) + self.recurrent(previous_spikes)
         spikes = TriangularSurrogate.apply(membrane - self.threshold, 1.)
-        membrane = membrane - spikes * self.threshold if self.soft_reset else membrane * (1 - spikes)
+        if self.reset_mode == 'immediate':
+            membrane = membrane - spikes * self.threshold if self.soft_reset else membrane * (1 - spikes)
         return spikes, (membrane, spikes)
 
 
 class TemporalSCN(nn.Module):
     def __init__(self, backbone_kwargs, *, memory='lif', hidden_size=32, memory_tau=.9,
-                 memory_threshold=.5, hierarchical=False, boundary=False):
+                 memory_threshold=.5, memory_reset='immediate', hierarchical=False, boundary=False):
         super().__init__()
         if memory not in {'none', 'lif'}:
             raise ValueError('Memory must be none or lif.')
+        if memory_reset not in {'immediate', 'delayed'}:
+            raise ValueError('Recurrent reset mode must be immediate or delayed.')
         self.backbone = DualHeadSCN(**{**backbone_kwargs, 'backbone': True})
         self.memory_kind, self.hierarchical = memory, hierarchical
         self.memory = (RecurrentLIF(self.backbone.fused_dim, hidden_size, memory_tau,
-                                   memory_threshold, backbone_kwargs.get('soft_reset', True))
+                                   memory_threshold, backbone_kwargs.get('soft_reset', True), memory_reset)
                        if memory == 'lif' else None)
         size = hidden_size if self.memory is not None else self.backbone.fused_dim
         if hierarchical:

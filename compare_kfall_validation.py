@@ -36,7 +36,7 @@ def read_validation(run):
         fall_recall=float(recall_score(truth == 0, predicted == 0, zero_division=0)))
 
 
-def compare_validation(baseline, candidate, tolerance=0.):
+def compare_validation(baseline, candidate, tolerance=0., *, allow_architecture_changes=False):
     if not np.isfinite(tolerance) or tolerance < 0:
         raise ValueError('Tolerance must be finite and nonnegative.')
     left, right = read_validation(baseline), read_validation(candidate)
@@ -47,11 +47,21 @@ def compare_validation(baseline, candidate, tolerance=0.):
             raise ValueError(f'Validation provenance differs: {key}.')
     if left['metadata']['config'] != right['metadata']['config']:
         raise ValueError('Encoder/label configurations must match for an architecture comparison.')
+    architecture_keys = {'conv_ch', 'kernels', 'offset_hidden'}
+    architecture_changes = {}
+    for key in ('architecture', 'conv_ch', 'kernels', 'offset_hidden', 'memory',
+                'recurrent_hidden', 'memory_tau', 'memory_threshold', 'memory_reset', 'head_mode'):
+        default = 'immediate' if key == 'memory_reset' else 'standard' if key == 'architecture' else None
+        before, after = left['config'].get(key, default), right['config'].get(key, default)
+        if before != after:
+            architecture_changes[key] = {'baseline': before, 'candidate': after}
     for key in ('batch_size', 'epochs', 'lr', 'wd', 'label_smoothing', 'amp', 'class_weight',
                 'train_per_class', 'tau', 'thresh', 'hard_reset', 'merge_polarities', 'conv_ch',
                 'kernels', 'strides', 'pool_kernels', 'pool_strides', 'pool_paddings',
                 'offset_hidden', 'spiking_heads', 'head_rate_scale', 'p_drop', 'sequence_length', 'boundary_ignore_seconds',
                 'patience', 'plateau_patience', 'lr_factor', 'min_lr', 'grad_clip'):
+        if allow_architecture_changes and key in architecture_keys:
+            continue
         if left['config'].get(key) != right['config'].get(key):
             raise ValueError(f'Training settings differ beyond the experimental architecture: {key}.')
     accepted = all(right[key] + tolerance >= left[key] for key in ('macro_f1', 'fall_recall'))
@@ -60,6 +70,7 @@ def compare_validation(baseline, candidate, tolerance=0.):
         baseline={key: left[key] for key in ('run_dir', 'accuracy', 'macro_f1', 'fall_recall')},
         candidate={key: right[key] for key in ('run_dir', 'accuracy', 'macro_f1', 'fall_recall')},
         cohort_sha256=left['cohort_sha256'],
+        architecture_changes=architecture_changes,
         note='Point estimate comparison; does not establish statistical superiority or automatically change the model.')
 
 
@@ -68,10 +79,13 @@ def main(argv=None):
     parser.add_argument('--baseline', type=Path, required=True)
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--tolerance', type=float, default=0.)
+    parser.add_argument('--allow-architecture-changes', action='store_true',
+                        help='Allow different convolution channels/kernels and offset width; preserve data and training settings.')
     parser.add_argument('--output', type=Path, default=Path('results/kfall_validation_comparison.json'))
     args = parser.parse_args(argv)
     try:
-        result = compare_validation(args.baseline, args.candidate, args.tolerance)
+        result = compare_validation(args.baseline, args.candidate, args.tolerance,
+                                    allow_architecture_changes=args.allow_architecture_changes)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result, indent=2))

@@ -12,10 +12,14 @@ def main(argv=None):
     parser.add_argument('--device', default='auto')
     parser.add_argument('--cache-dir', type=Path)
     parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--fuse-bn', action='store_true', help='Fold BatchNorm into Conv/Linear for FP32 inference.')
+    parser.add_argument('--weight-bits', type=int, choices=[8],
+                        help='Simulate symmetric per-output-channel INT8 weights with FP32 computation/state.')
     args = parser.parse_args(argv)
     try:
         report = evaluate_temporal(args.run_dir, split_name=args.split, device=args.device,
-                                   cache_dir=args.cache_dir, output_dir=args.output_dir)
+                                   cache_dir=args.cache_dir, output_dir=args.output_dir,
+                                   fuse_bn=args.fuse_bn, weight_bits=args.weight_bits)
         print(f"[{args.split}] accuracy={report['accuracy']:.2%} macro_F1={report['macro_f1']:.4f}")
         print(f"[saved] {report['output_dir']}")
     except (ValueError, OSError, RuntimeError, KeyError) as exc:

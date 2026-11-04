@@ -19,8 +19,12 @@ from train.temporal import run_temporal_epoch
 def get_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
+    parser.add_argument('--architecture', choices=['standard', 'compact'], default='standard',
+                        help='compact: channels 16/32/32, kernels 16/16/8, offset 8; explicit flags override this preset.')
     parser.add_argument('--no-progress', action='store_true', help='Disable tqdm epoch progress bars.')
     parser.add_argument('--memory', choices=['none', 'lif'], default='lif')
+    parser.add_argument('--memory-reset', choices=['immediate', 'delayed'], default=None,
+                        help='Recurrent reset timing: compact defaults to delayed, standard to immediate.')
     parser.add_argument('--recurrent-hidden', type=int, default=32)
     parser.add_argument('--memory-tau', type=float, default=.9)
     parser.add_argument('--memory-threshold', type=float, default=.5)
@@ -33,7 +37,11 @@ def get_args(argv=None):
         parser.print_help()
         base_args(['--help'])
     temporal, remaining = parser.parse_known_args(argv)
-    cfg = base_args(['--batch-size', '8', '--workers', '0', '--stride', '10', *remaining])
+    preset = (['--conv-ch', '16', '32', '32', '--kernels', '16', '16', '8', '--offset-hidden', '8']
+              if temporal.architecture == 'compact' else [])
+    if temporal.memory_reset is None:
+        temporal.memory_reset = 'delayed' if temporal.architecture == 'compact' else 'immediate'
+    cfg = base_args(['--batch-size', '8', '--workers', '0', '--stride', '10', *preset, *remaining])
     for key, value in vars(temporal).items():
         setattr(cfg, key, value)
     if cfg.n_classes != 4 or cfg.label_policy == 'legacy' or cfg.head_mode == 'dual':
@@ -58,6 +66,7 @@ def get_args(argv=None):
 def build_temporal_model(cfg, device):
     return TemporalSCN(scn_model_kwargs(cfg), memory=cfg.memory, hidden_size=cfg.recurrent_hidden,
         memory_tau=cfg.memory_tau, memory_threshold=cfg.memory_threshold,
+        memory_reset=getattr(cfg, 'memory_reset', 'immediate'),
         hierarchical=cfg.head_mode == 'hierarchical', boundary=cfg.lambda_boundary > 0).to(device)
 
 
@@ -97,6 +106,8 @@ def main(argv=None):
     model = build_temporal_model(cfg, device)
     print(f'[temporal] {cfg.memory}({cfg.recurrent_hidden}) | K={cfg.sequence_length} | '
           f'{100/cfg.stride:g} decisions/s | batch={cfg.batch_size} recordings | parameters={count_parameters(model)[0]}', flush=True)
+    print(f'[architecture] {cfg.architecture} | channels={cfg.conv_ch} | kernels={cfg.kernels} | '
+          f'offset={cfg.offset_hidden} | recurrent_reset={cfg.memory_reset}', flush=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
     scaler = make_grad_scaler(cfg.amp and device.type == 'cuda')
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=cfg.lr_factor,

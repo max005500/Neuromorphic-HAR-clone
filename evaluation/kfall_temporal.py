@@ -139,10 +139,35 @@ def episode_metrics(predictions, arrays, metadata, split_name, *, match_seconds=
         definitions='Held predictions; a fall alert matches an episode when its interval intersects onset..impact. Unmatched alerts overlapping Normal count as false alarms. No predictions before first complete window.')
 
 
-def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=None, output_dir=None):
+def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=None, output_dir=None,
+                      fuse_bn=False, weight_bits=None):
     if split_name not in {'val', 'test'}:
         raise ValueError('Evaluation split must be val or test.')
     model, cfg, saved, arrays, metadata, cache, dev, stats = load_temporal_run(run_dir, device, cache_dir, split_name=split_name)
+    original_parameters = count_parameters(model)[0]
+    transformed = fuse_bn or weight_bits is not None
+    model.eval()
+    if transformed:
+        # Numerical sensitivity experiments use FP32 arithmetic and state even
+        # when the saved training configuration enabled CUDA autocast.
+        cfg = SimpleNamespace(**{**vars(cfg), 'amp': False})
+        model.float()
+    from models.inference import prepare_temporal_inference
+    model, inference = prepare_temporal_inference(model, fuse_bn=fuse_bn, weight_bits=weight_bits)
+    inference['autocast'] = bool(cfg.amp and dev.type == 'cuda')
+    inference['state_precision'] = 'float32' if not inference['autocast'] else 'autocast'
+    name = 'test_best' if split_name == 'test' else 'validation'
+    if fuse_bn:
+        name += '_fused'
+    if weight_bits is not None:
+        name += f'_int{weight_bits}_weights'
+    destination = Path(output_dir) if output_dir else Path(run_dir) / 'metrics' / name
+    if destination.resolve().is_relative_to(cache.resolve()):
+        raise ValueError('Store reports outside the read-only event cache.')
+    if transformed:
+        canonical = [Path(run_dir) / 'metrics' / value for value in ('validation', 'test_best')]
+        if any(destination.resolve() == value.resolve() for value in canonical):
+            raise ValueError('Store transformed inference in a separate output directory to preserve baseline metrics.')
     episodes = EpisodeSet(arrays, metadata, boundary_ignore_seconds=cfg.boundary_ignore_seconds)
     if dev.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(dev)
@@ -150,9 +175,6 @@ def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=No
     measured = run_temporal_epoch(model, episodes, cfg, dev, stats, collect=True, phase=split_name.capitalize())
     seconds = time.perf_counter() - started
     p = measured.pop('predictions')
-    destination = Path(output_dir) if output_dir else Path(run_dir) / 'metrics' / ('test_best' if split_name == 'test' else 'validation')
-    if destination.resolve().is_relative_to(cache.resolve()):
-        raise ValueError('Store reports outside the read-only event cache.')
     destination.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(destination / 'episode_predictions.npz', **p)
     keep = p['valid']
@@ -162,6 +184,10 @@ def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=No
     summary = {**measured, 'dataset': 'kfall', 'split': split_name, 'model_type': cfg.model_type,
         'temporal_protocol': cfg.temporal_protocol, 'head_mode': cfg.head_mode, 'memory': cfg.memory,
         'sequence_length': cfg.sequence_length, 'recurrent_hidden': cfg.recurrent_hidden,
+        'architecture': getattr(cfg, 'architecture', 'standard'),
+        'conv_channels': cfg.conv_ch, 'conv_kernels': cfg.kernels,
+        'memory_reset': getattr(cfg, 'memory_reset', 'immediate'),
+        'inference': inference, 'original_parameters': original_parameters,
         'run_dir': str(Path(run_dir).resolve()), 'checkpoint': str(Path(run_dir) / 'checkpoints/best_model.pt'),
         'best_epoch': saved['epoch'], 'best_val_loss': saved['best_val_loss'],
         'n_classes': 4, 'inference_time_sec': seconds, 'parameters': count_parameters(model)[0],
@@ -197,7 +223,7 @@ def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=No
     save_json(destination / 'metrics.json', report)
     # Files remain compatible with the simple result-inspection workflow.
     run_metrics = Path(run_dir) / 'metrics'
-    if output_dir is None:
+    if output_dir is None and not transformed:
         save_json(run_metrics / ('test_metrics.json' if split_name == 'test' else 'validation_metrics.json'), report)
         np.save(run_metrics / ('y_true.npy' if split_name == 'test' else 'y_true_val.npy'), p['target'][keep])
         np.save(run_metrics / ('y_pred.npy' if split_name == 'test' else 'y_pred_val.npy'), p['predicted'][keep])
