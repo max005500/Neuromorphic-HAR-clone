@@ -86,7 +86,7 @@ def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, name
 def save_evaluation_reports(
     output_dir: str | Path, *, y_true: np.ndarray, probabilities: np.ndarray,
     window_indices: np.ndarray, split: dict[str, np.ndarray],
-    metadata: dict[str, Any], summary: dict[str, Any],
+    metadata: dict[str, Any], summary: dict[str, Any], predicted_classes: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Save full reports, preserving the original test-cache index for every row.
 
@@ -126,6 +126,11 @@ def save_evaluation_reports(
     truth = truth.astype(np.int64, copy=False)
     indices = indices.astype(np.int64, copy=False)
     predicted = probabilities.argmax(axis=1).astype(np.int64)
+    if predicted_classes is not None:
+        routed = np.asarray(predicted_classes)
+        if routed.shape != truth.shape or routed.dtype.kind not in 'iu' or not np.isin(routed, range(n_classes)).all():
+            raise ValueError('Explicit predictions must be valid integer class IDs aligned with targets.')
+        predicted = routed.astype(np.int64, copy=False)
     subjects = np.asarray(split["subject"])[indices]
     records = metadata["recordings"]
     csv_rows = []

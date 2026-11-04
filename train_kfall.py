@@ -185,7 +185,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dead-zone", type=float, default=defaults.dead_zone)
     p.add_argument("--sd-init", choices=["x0", "zero"], default=defaults.sd_init)
 
-    p.add_argument("--head-mode", choices=["single", "dual"], default="single", help="Activity single head, or dual architecture with the unannotated posture head disabled.")
+    p.add_argument("--head-mode", choices=["single", "dual", "hierarchical"], default="single", help="Flat activity classifier, legacy dual model, or three supervised heads: Normal/Event and their child classes.")
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--run", default="kfall_scn")
     p.add_argument("--epochs", type=int, default=100)
@@ -257,6 +257,8 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     cfg.n_ch = 6
     cfg.dataset = "kfall"
     cfg.n_classes = 4 if cfg.post_impact_seconds > 0 else 3
+    if cfg.head_mode == "hierarchical" and cfg.n_classes != 4:
+        p.error("Hierarchical heads require four classes: --post-impact-seconds must be positive.")
     cfg.lambda_h1 = 1.0
     cfg.lambda_h2 = 0.0
     cfg.use_ambiguous = False
@@ -314,6 +316,11 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
 
 def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
     kwargs = scn_model_kwargs(cfg)
+    if cfg.head_mode == "hierarchical":
+        if cfg.n_classes != 4:
+            raise ValueError("HierarchicalSCN requires four KFall classes.")
+        from models.hierarchical import HierarchicalSCN
+        return HierarchicalSCN(**kwargs).to(dev)
     if cfg.head_mode == "single":
         return SingleHeadSCN(n_classes=cfg.n_classes, **kwargs).to(dev)
     model = DualHeadSCN(n_classes_head1=cfg.n_classes, **kwargs).to(dev)
@@ -425,6 +432,10 @@ def main(argv: list[str] | None = None) -> None:
         class_counts_train=named_class_counts(data["training_labels"], names),
         total_time_sec=float(time.time() - fit_result["started_at"]),
     )
+    if cfg.head_mode == 'hierarchical':
+        from evaluation.kfall_hierarchy import save_hierarchy_reports
+        save_hierarchy_reports(metrics_dir / 'hierarchy_validation', validation_true,
+                               validation_metrics.pop('hierarchy_probabilities'))
     save_json(metrics_dir / "validation_metrics.json", validation_metrics)
     if cfg.validation_only:
         print(json.dumps(json_ready(validation_metrics), indent=2, ensure_ascii=False))
@@ -447,7 +458,11 @@ def main(argv: list[str] | None = None) -> None:
         total_time_sec=float(time.time() - fit_result["started_at"]),
         class_counts_test=named_class_counts(y_true, names),
         head2_supervised=False,
+        hierarchy_supervised=cfg.head_mode == "hierarchical",
     )
+    if cfg.head_mode == 'hierarchical':
+        from evaluation.kfall_hierarchy import save_hierarchy_reports
+        save_hierarchy_reports(metrics_dir / 'hierarchy_test', y_true, test_metrics.pop('hierarchy_probabilities'))
     save_json(metrics_dir / "test_metrics.json", test_metrics)
     print(json.dumps(json_ready(test_metrics), indent=2, ensure_ascii=False))
     print(f"[done] saved_run={run_dir}")

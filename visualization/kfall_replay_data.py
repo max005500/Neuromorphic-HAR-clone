@@ -45,6 +45,7 @@ class ReplayData:
     post_impact_seconds: float = 0.0
     post_impact_end_time: float | None = None
     true_labels: np.ndarray | None = None
+    hierarchy_probabilities: dict[str, np.ndarray] | None = None
 
 
 def prediction_index_at(replay: ReplayData, time: float) -> int | None:
@@ -174,6 +175,11 @@ def prepare_replay(
     model.load_state_dict(saved["model_state_dict"], strict=True)
     model.eval()
     probability_batches = []
+    hierarchical = cfg.head_mode == 'hierarchical'
+    routed_batches = []
+    if hierarchical:
+        from models.hierarchical import hierarchy_predict, head_probabilities
+        head_batches = {key: [] for key in ('group', 'normal', 'event')}
     with torch.inference_mode():
         for begin in range(0, len(starts), int(size)):
             events, offsets = [], []
@@ -185,12 +191,21 @@ def prepare_replay(
             batch_events = torch.as_tensor(np.stack(events), dtype=torch.float32, device=dev)
             batch_offsets = torch.as_tensor(np.stack(offsets), dtype=torch.float32, device=dev)
             with make_autocast(bool(cfg.amp and dev.type == "cuda")):
-                logits = extract_single_logits(model(batch_events, offset=batch_offsets))
+                result = model(batch_events, offset=batch_offsets)
+                logits = extract_single_logits(result)
                 if logits.shape != (len(events), cfg.n_classes) or not torch.isfinite(logits).all():
                     raise ValueError("The saved checkpoint produced invalid replay activity logits.")
             probability_batches.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
+            if hierarchical:
+                routed_batches.append(hierarchy_predict(result[0]).cpu().numpy())
+                for key, value in head_probabilities(result[0]).items():
+                    head_batches[key].append(value.cpu().numpy())
     probabilities = np.concatenate(probability_batches)
-    predicted = probabilities.argmax(axis=1).astype(np.int64)
+    predicted = np.concatenate(routed_batches).astype(np.int64) if hierarchical else probabilities.argmax(axis=1).astype(np.int64)
+    hierarchy_probs = {key: np.concatenate(chunks) for key, chunks in head_batches.items()} if hierarchical else None
+    if hierarchy_probs:
+        for array in hierarchy_probs.values():
+            array.setflags(write=False)
     times = (frames - frames[0]).astype(np.float64) / encoder.sample_rate_hz
     endpoint_times = times[endpoints]
     onset_time = impact_time = post_end_time = None
@@ -215,5 +230,5 @@ def prepare_replay(
         subject=record["subject"], label=class_names(cfg.n_classes)[int(record["label_id"])],
         post_impact_seconds=float(getattr(encoder, "post_impact_seconds", 0.0)),
         post_impact_end_time=post_end_time,
-        true_labels=true_labels,
+        true_labels=true_labels, hierarchy_probabilities=hierarchy_probs,
     )

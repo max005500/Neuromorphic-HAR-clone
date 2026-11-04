@@ -940,3 +940,16 @@ python tune_kfall_gyro.py --cache-dir data/kfall_cache/NOMBRE_DE_LA_CACHE \
 ```
 
 En ese modo se guardan tanto la imagen como el JSON.
+
+### Experimento: clasificación jerárquica KFall
+
+`--head-mode hierarchical` añade tres salidas supervisadas: **Normal/Evento**,
+**Dynamic/Static** y **Fall/Postimpact**. La decisión sigue el grupo y luego su
+rama. Usa el mismo encoder, etiquetas y cuerpo SCN; las cachés pueden reutilizarse.
+El modo plano original se selecciona con `--head-mode single` y sigue siendo el
+predeterminado. El comparador de ventanas también admite esta opción.
+
+Las métricas y curvas distinguen raíz, ramas condicionales y resultado final de
+cuatro clases. La evaluación y los reproductores cargan cada checkpoint con su
+arquitectura guardada. Consulta [el experimento](experiments/hierarchy/README.md)
+para entrenar, revisar resultados y recuperar la copia de seguridad previa.

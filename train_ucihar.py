@@ -219,6 +219,11 @@ def run_epoch(
     total = 0
     y_true_chunks: list[torch.Tensor] = []
     y_pred_chunks: list[torch.Tensor] = []
+    hierarchical = getattr(cfg, 'head_mode', 'single') == 'hierarchical'
+    if hierarchical:
+        from models.hierarchical import hierarchy_loss, hierarchy_predict, hierarchy_targets, head_probabilities
+        hierarchy_totals = torch.zeros(8, dtype=torch.float64, device=dev)
+        head_chunks = {key: [] for key in ('group', 'normal', 'event')}
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     with grad_ctx:
@@ -229,13 +234,15 @@ def run_epoch(
                 optimizer.zero_grad(set_to_none=True)
 
             with make_autocast(amp_enabled):
-                logits = extract_single_logits(model(x, offset=offset))
-                loss = F.cross_entropy(
-                    logits,
-                    y,
-                    weight=class_weight,
-                    label_smoothing=cfg.label_smoothing,
-                )
+                result = model(x, offset=offset)
+                logits = extract_single_logits(result)
+                if hierarchical:
+                    outputs = result[0]
+                    loss, loss_terms = hierarchy_loss(outputs, y, class_weight=class_weight,
+                                                      label_smoothing=cfg.label_smoothing)
+                else:
+                    loss = F.cross_entropy(logits, y, weight=class_weight,
+                                           label_smoothing=cfg.label_smoothing)
 
             if is_train:
                 assert scaler is not None
@@ -247,7 +254,19 @@ def run_epoch(
                 scaler.update()
 
             bs = int(y.shape[0])
-            pred = logits.argmax(dim=1)
+            pred = hierarchy_predict(outputs) if hierarchical else logits.argmax(dim=1)
+            if hierarchical:
+                group, normal, event = hierarchy_targets(y)
+                hierarchy_totals[0].add_((outputs['group'].argmax(1) == group).sum())
+                hierarchy_totals[1].add_(((outputs['normal'].argmax(1) == normal) & (group == 0)).sum())
+                hierarchy_totals[2].add_(((outputs['event'].argmax(1) == event) & (group == 1)).sum())
+                hierarchy_totals[3].add_((group == 0).sum())
+                hierarchy_totals[4].add_((group == 1).sum())
+                for index, key in enumerate(('group', 'normal', 'event'), 5):
+                    hierarchy_totals[index].add_(loss_terms[key].detach().to(torch.float64) * bs)
+                if collect_predictions:
+                    for key, value in head_probabilities(outputs).items():
+                        head_chunks[key].append(value)
             total += bs
             totals[0].add_(loss.detach().to(torch.float64) * bs)
             totals[1].add_((pred == y).sum())
@@ -265,6 +284,16 @@ def run_epoch(
         "acc": correct / max(total, 1),
         "n": int(total),
     }
+    if hierarchical:
+        group_correct, normal_correct, event_correct, n_normal, n_event, lg, ln, le = hierarchy_totals.cpu().tolist()
+        out.update(acc_group=group_correct / max(total, 1),
+                   acc_normal=normal_correct / n_normal if n_normal else None,
+                   acc_event=event_correct / n_event if n_event else None,
+                   n_normal=int(n_normal), n_event=int(n_event),
+                   loss_group=lg / max(total, 1), loss_normal=ln / max(total, 1), loss_event=le / max(total, 1))
+        if collect_predictions:
+            out['hierarchy_probabilities'] = {key: torch.cat(chunks).cpu().numpy() if chunks else np.empty((0, 2))
+                                              for key, chunks in head_chunks.items()}
     if collect_predictions:
         out["y_true"] = torch.cat(y_true_chunks).cpu().numpy() if y_true_chunks else np.array([], dtype=np.int64)
         out["y_pred"] = torch.cat(y_pred_chunks).cpu().numpy() if y_pred_chunks else np.array([], dtype=np.int64)

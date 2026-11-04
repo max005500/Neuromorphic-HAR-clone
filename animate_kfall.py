@@ -103,6 +103,17 @@ class KFallReplayPlayer:
             if self.replay.probabilities.shape[1] == 4:
                 index = int(info["prediction_index"])
                 text += f" · P(Postimpact) = {self.replay.probabilities[index, 3]:.1%}"
+        hierarchy = getattr(self.replay, 'hierarchy_probabilities', None)
+        if prediction is not None and hierarchy is not None:
+            index = int(info['prediction_index'])
+            is_event = int(prediction) in (0, 3)
+            branch, key = ('Evento', 'event') if is_event else ('Normal', 'normal')
+            child = int(prediction) // 3 if is_event else int(prediction) - 1
+            activity = CLASS_LABELS[int(prediction)]
+            text = (f"{branch} → {activity} · P({branch})={hierarchy['group'][index, int(is_event)]:.1%}"
+                    f" · P({activity}|{branch})={hierarchy[key][index, child]:.1%}"
+                    f" · P(Fall)={probability:.1%}")
+        self.prediction_text.set_fontsize(11 if hierarchy is not None else 13)
         self.prediction_text.set_text(text)
         self.prediction_text.set_color(color)
         self.truth_text.set_text(f"Etiqueta real: {info['real_phase']}")

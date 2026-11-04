@@ -57,8 +57,10 @@ def _load_checkpoint(path: Path) -> tuple[dict[str, Any], SimpleNamespace]:
     cfg = SimpleNamespace(**checkpoint["config"])
     if getattr(cfg, "dataset", None) != "kfall" or getattr(cfg, "n_classes", None) not in {3, 4}:
         raise ValueError("Use a KFall checkpoint trained with three or four activity classes.")
-    if getattr(cfg, "head_mode", None) not in {"single", "dual"}:
-        raise ValueError("Checkpoint head_mode must be single or dual.")
+    if getattr(cfg, "head_mode", None) not in {"single", "dual", "hierarchical"}:
+        raise ValueError("Checkpoint head_mode must be single, dual or hierarchical.")
+    if cfg.head_mode == "hierarchical" and cfg.n_classes != 4:
+        raise ValueError("Hierarchical checkpoints require four KFall classes.")
     required = (
         "n_ch", "tau", "thresh", "hard_reset", "merge_polarities", "conv_ch",
         "kernels", "strides", "pool_kernels", "pool_strides", "pool_paddings",
@@ -144,6 +146,11 @@ def evaluate_run(
     loader = DataLoader(Subset(dataset, indices.tolist()), batch_size=size, shuffle=False,
                         num_workers=int(workers), pin_memory=dev.type == "cuda")
     probabilities, targets = [], []
+    hierarchical = cfg.head_mode == 'hierarchical'
+    if hierarchical:
+        from models.hierarchical import hierarchy_loss, hierarchy_predict, head_probabilities
+        routed_batches = []
+        hierarchy_batches = {key: [] for key in ('group', 'normal', 'event')}
     loss_sum = 0.0
     inference_started = time.perf_counter()
     with torch.inference_mode():
@@ -154,14 +161,24 @@ def evaluate_run(
             with make_autocast(bool(cfg.amp and dev.type == "cuda")):
                 # extract_single_logits also selects Head 1 of the optional
                 # dual architecture; KFall supplies no posture-head targets.
-                logits = extract_single_logits(model(events, offset=offsets))
+                result = model(events, offset=offsets)
+                logits = extract_single_logits(result)
                 if logits.shape != (len(target), cfg.n_classes) or not torch.isfinite(logits).all():
                     raise ValueError(f"The checkpoint produced invalid {cfg.n_classes}-class logits.")
-                loss = F.cross_entropy(logits, target, weight=class_weight,
-                                       label_smoothing=float(cfg.label_smoothing))
+                if hierarchical:
+                    outputs = result[0]
+                    loss, _ = hierarchy_loss(outputs, target, class_weight=class_weight,
+                                              label_smoothing=float(cfg.label_smoothing))
+                else:
+                    loss = F.cross_entropy(logits, target, weight=class_weight,
+                                           label_smoothing=float(cfg.label_smoothing))
             loss_sum += float(loss.item()) * len(target)
             probabilities.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
             targets.append(target.cpu().numpy())
+            if hierarchical:
+                routed_batches.append(hierarchy_predict(outputs).cpu().numpy())
+                for key, value in head_probabilities(outputs).items():
+                    hierarchy_batches[key].append(value.cpu().numpy())
     inference_time = time.perf_counter() - inference_started
     y_true = np.concatenate(targets)
     probability = np.concatenate(probabilities)
@@ -188,15 +205,27 @@ def evaluate_run(
         "evaluation_time_sec": time.perf_counter() - started,
         "output_dir": str(destination),
     }
+    routed = None
+    if hierarchical:
+        from evaluation.kfall_hierarchy import save_hierarchy_reports
+        routed = np.concatenate(routed_batches)
+        hierarchy = save_hierarchy_reports(destination / 'hierarchy', y_true,
+            {key: np.concatenate(chunks) for key, chunks in hierarchy_batches.items()})
+        summary.update(decision_rule=hierarchy['decision_rule'],
+            leaf_probability_rule=hierarchy['leaf_probability_rule'],
+            group_accuracy=hierarchy['group']['accuracy'],
+            normal_conditional_accuracy=hierarchy['normal']['accuracy'],
+            event_conditional_accuracy=hierarchy['event']['accuracy'])
+        summary['loss_aggregation'] = 'sample-count-weighted hierarchical root plus masked branch loss'
     if len(indices) == 1:
-        prediction = int(probability[0].argmax())
+        prediction = int(routed[0] if routed is not None else probability[0].argmax())
         summary["selected_window"] = {
             "index": int(indices[0]), "subject": str(split["subject"][indices[0]]),
             "true": names[int(y_true[0])], "predicted": names[prediction],
             "probabilities": {name: float(probability[0, key]) for key, name in names.items()},
         }
     return save_evaluation_reports(destination, y_true=y_true, probabilities=probability,
-                                   window_indices=indices, split=split, metadata=metadata, summary=summary)
+                                   window_indices=indices, split=split, metadata=metadata, summary=summary, predicted_classes=routed)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -66,7 +66,15 @@ def save_training_curves(
         loss_panels.append(("loss_h2", "Posture loss (Head 2)"))
 
     paths = {}
-    for name, panels in (("accuracy", accuracy_panels), ("loss", loss_panels)):
+    figures = [("accuracy", accuracy_panels), ("loss", loss_panels)]
+    if has_values('acc_group'):
+        figures.extend([
+            ('hierarchy_accuracy', [('acc_group', 'Normal / Event'),
+                ('acc_normal', 'Dynamic / Static | true Normal'), ('acc_event', 'Fall / Postimpact | true Event')]),
+            ('hierarchy_loss', [('loss_group', 'Root loss'),
+                ('loss_normal', 'Normal branch contribution'), ('loss_event', 'Event branch contribution')]),
+        ])
+    for name, panels in figures:
         figure = Figure(figsize=(6.5 * len(panels), 4.5), layout="constrained", facecolor="white")
         FigureCanvasAgg(figure)
         axes = figure.subplots(1, len(panels), squeeze=False)[0]
@@ -78,11 +86,11 @@ def save_training_curves(
                 ):
                     axis.plot(epochs, _metric_values(history, split, key), label=label,
                               color=color, linestyle=style, linewidth=2, marker="o", markersize=4)
-                axis.set(title=title, xlabel="Epoch", ylabel="Accuracy (%)" if name == "accuracy" else "Loss")
+                axis.set(title=title, xlabel="Epoch", ylabel="Accuracy (%)" if name.endswith("accuracy") else "Loss")
                 axis.xaxis.set_major_locator(MaxNLocator(integer=True))
                 if len(epochs) == 1:
                     axis.set_xlim(float(epochs[0]) - 0.5, float(epochs[0]) + 0.5)
-                if name == "accuracy":
+                if name.endswith("accuracy"):
                     axis.set_ylim(0, 1)
                     axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
                 axis.grid(True, color="#cbd5e1", alpha=0.55, linewidth=0.7)

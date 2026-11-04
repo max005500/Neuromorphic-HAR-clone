@@ -201,6 +201,8 @@ def training_command(args: argparse.Namespace, experiment: WindowExperiment) -> 
                "--sd-init", args.sd_init, "--epochs", str(args.epochs),
                "--batch-size", str(args.batch_size), "--workers", str(args.workers),
                "--gpu", str(args.gpu), "--device", args.device]
+    if getattr(args, "head_mode", "single") != "single":
+        command.extend(("--head-mode", args.head_mode))
     if args.label_dir is not None:
         command.extend(("--label-dir", str(Path(args.label_dir).resolve())))
     command.extend(label_command_args(args))
@@ -247,7 +249,7 @@ def _collect_run(
         entry = per_class[str(label)]
         return float(entry["recall"]) if entry["support"] else None
 
-    result.update(run_dir=str(run), history=history, test_loss=metrics["loss"],
+    result.update(head_mode=getattr(args, "head_mode", "single"), run_dir=str(run), history=history, test_loss=metrics["loss"],
                   test_accuracy=metrics.get("acc", metrics.get("acc_h1")),
                   test_balanced_accuracy=float(balanced_accuracy_score(truth, prediction)),
                   test_macro_f1=float(f1_score(truth, prediction, average="macro", zero_division=0)),
@@ -433,7 +435,7 @@ def _training_plot(path: Path, results: Sequence[dict[str, Any]]) -> None:
 
 def _save_summary(path: Path, results: Sequence[dict[str, Any]]) -> None:
     fields = ("duration_seconds", "raw_win", "out_win", "stride", "post_impact_seconds",
-              "endpoint_context", "resample_hz", "test_accuracy", "test_balanced_accuracy", "test_macro_f1",
+              "endpoint_context", "resample_hz", "head_mode", "test_accuracy", "test_balanced_accuracy", "test_macro_f1",
               "test_fall_recall", "test_postimpact_recall", "test_loss", "best_val_loss", "best_epoch",
               "training_time_sec", "reused_completed_run", "run_dir", "cache_dir")
     with path.open("w", newline="", encoding="utf-8") as stream:
@@ -493,6 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Read theta_best from a calibration JSON file.")
     parser.add_argument("--dead-zone", type=float, default=.5)
     parser.add_argument("--sd-init", choices=("x0", "zero"), default="x0")
+    parser.add_argument("--head-mode", choices=["single", "dual", "hierarchical"], default="single")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--workers", type=int, default=4)

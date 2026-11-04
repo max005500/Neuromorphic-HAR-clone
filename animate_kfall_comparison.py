@@ -110,7 +110,9 @@ class KFallComparisonPlayer(KFallReplayPlayer):
             else:
                 cls = int(info["predicted_class"])
                 confidence = replay.probabilities[index, cls]
-                text.set_text(f"{CLASS_LABELS[cls]} ({confidence:.1%})\n"
+                hierarchy = getattr(replay, 'hierarchy_probabilities', None)
+                branch = ('Evento → ' if cls in (0, 3) else 'Normal → ') if hierarchy is not None else ''
+                text.set_text(f"{branch}{CLASS_LABELS[cls]} ({confidence:.1%})\n"
                               f"P(Fall): {info['p_fall']:.1%} · decisión {info['prediction_time']:.2f} s")
                 text.set_color(CLASS_COLORS[cls])
         self.truth_text.set_text(f"t = {self.current_time:.2f} s · Etiqueta real: {infos[0]['real_phase']}")
