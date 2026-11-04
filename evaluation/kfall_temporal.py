@@ -137,7 +137,7 @@ def evaluate_temporal(run_dir, *, split_name='test', device='auto', cache_dir=No
     if dev.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(dev)
     started = time.perf_counter()
-    measured = run_temporal_epoch(model, episodes, cfg, dev, stats, collect=True)
+    measured = run_temporal_epoch(model, episodes, cfg, dev, stats, collect=True, phase=split_name.capitalize())
     seconds = time.perf_counter() - started
     p = measured.pop('predictions')
     destination = Path(output_dir) if output_dir else Path(run_dir) / 'metrics' / ('test_best' if split_name == 'test' else 'validation')

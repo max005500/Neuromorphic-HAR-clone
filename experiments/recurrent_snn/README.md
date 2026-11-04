@@ -221,3 +221,39 @@ experimento a otro equipo. Para descartar este experimento basta con volver a
 `train_kfall.py`; los comandos originales siguen disponibles. Si necesitas
 recuperar archivos, extrae el ZIP en una carpeta aparte y compara antes de
 sobrescribir cambios posteriores.
+
+## Compilador C y rutas Triton de PyTorch
+
+Algunas versiones CUDA de PyTorch pueden ejecutar kernels Triton incluso sin
+activar `torch.compile`. Si el backward termina con `Failed to find C compiler`,
+instala un compilador en el mismo entorno Linux/WSL donde ejecutas Python:
+
+```bash
+sudo apt update
+sudo apt install build-essential
+export CC=/usr/bin/gcc
+export CXX=/usr/bin/g++
+```
+
+Después vuelve a ejecutar el entrenamiento. La pérdida temporal utiliza ahora
+productos elemento a elemento para la esperanza 4×4, evitando el backward de
+producto exterior batched de `einsum`. Los términos con lambda cero se calculan
+solo para registro y quedan fuera del grafo de backward. Se comprobó equivalencia
+de valores y gradientes respecto a la expresión original; esto no elimina los
+requisitos de compilación que otras operaciones de tu instalación puedan tener.
+
+## Progreso durante cada época
+
+Instala la dependencia nueva en el entorno activo con `python -m pip install tqdm`
+(o actualiza desde `requirements.txt`). En terminal, el mismo comando de
+entrenamiento muestra barras separadas para Train y Val, con bloques TBPTT
+completados/total, porcentaje, tiempo transcurrido y ETA. El total respeta la
+longitud real de las grabaciones y los últimos bloques parciales; no cuenta el
+padding como ventanas observadas. El postfix indica ventanas procesadas y grupo
+actual; loss y accuracy acumuladas se actualizan como máximo una vez cada cinco
+segundos, evitando lecturas escalares CUDA por bloque.
+
+Las evaluaciones finales también muestran progreso. En una salida redirigida
+que no sea terminal las barras se ocultan automáticamente. Usa `--no-progress`
+para desactivarlas al entrenar. Un proceso que ya estaba ejecutándose conserva
+el código que cargó al iniciar; la barra se aplica a ejecuciones nuevas.

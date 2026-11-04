@@ -19,6 +19,7 @@ from train.temporal import run_temporal_epoch
 def get_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
+    parser.add_argument('--no-progress', action='store_true', help='Disable tqdm epoch progress bars.')
     parser.add_argument('--memory', choices=['none', 'lif'], default='lif')
     parser.add_argument('--recurrent-hidden', type=int, default=32)
     parser.add_argument('--memory-tau', type=float, default=.9)
@@ -106,7 +107,7 @@ def main(argv=None):
         if optimizer is not None:
             epoch += 1
         return run_temporal_epoch(model, dataset, cfg, device, stats, optimizer=optimizer, scaler=scaler,
-                                  epoch=epoch, collect=collect_predictions)
+                                  epoch=epoch, collect=collect_predictions, phase='Train' if optimizer is not None else 'Val')
     checkpoint = run / 'checkpoints/best_model.pt'
     fit_model(model=model, train_loader=episodes['train'], val_loader=episodes['val'], cfg=cfg,
         optimizer=optimizer, scheduler=scheduler, scaler=scaler, metrics_dir=run / 'metrics',
