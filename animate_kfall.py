@@ -42,7 +42,7 @@ class KFallReplayPlayer:
         self.figure.canvas.manager.set_window_title("KFall · predicción frente a etiqueta real")
         self.figure.text(0.085, 0.966,
                          f"{replay.subject} · {replay.record['code']}/{replay.record['trial']} · "
-                         f"TEST · mejor checkpoint: época {replay.best_epoch}", fontsize=15, weight="bold")
+                         f"{replay.config.get('replay_split', 'test').upper()} · mejor checkpoint: época {replay.best_epoch}", fontsize=15, weight="bold")
         self.prediction_text = self.figure.text(0.085, 0.925, "", fontsize=13, weight="bold")
         self.truth_text = self.figure.text(0.085, 0.892, "", fontsize=12)
         self.time_text = self.figure.text(0.085, 0.855, "", fontsize=9, color="#475569")

@@ -20,7 +20,7 @@ from visualization.kfall_replay_data import _validate_source
 
 
 class ReplayAuditTests(unittest.TestCase):
-    def replay(self, corrupt=False):
+    def replay(self, corrupt=False, split_name='test'):
         frames = np.arange(1, 6)
         raw = np.zeros((5, 6), dtype=np.float32)
         record = dict(T=5, file='S01T04R01.csv', subject='SA01', code='T04', trial='R01', label_id=1)
@@ -40,7 +40,7 @@ class ReplayAuditTests(unittest.TestCase):
         store = SimpleNamespace(cfg=loader, _record_path=lambda rec: Path(rec['file']),
             get_window=lambda *a: self.fail('Replay must not recompute full-record labels per window.'))
         with patch('animate_kfall_temporal.load_temporal_run', return_value=(object(), cfg,
-                dict(epoch=1, best_val_loss=.1), arrays, metadata, Path('/cache'), torch.device('cpu'), {})), patch(
+                dict(epoch=1, best_val_loss=.1), arrays, metadata, Path('/cache'), torch.device('cpu'), {})) as loader, patch(
                 'animate_kfall_temporal.KFallWindowStore', return_value=store), patch(
                 'animate_kfall_temporal.load_record', return_value=(raw, frames, record)), patch(
                 'animate_kfall_temporal._validate_source', wraps=_validate_source) as validate, patch(
@@ -53,19 +53,34 @@ class ReplayAuditTests(unittest.TestCase):
             infer.side_effect = predict
             if corrupt:
                 with self.assertRaisesRegex(ValueError, 'differs'):
-                    prepare_temporal_replay('/run')
+                    prepare_temporal_replay('/run', split_name=split_name)
                 self.assertFalse(infer.called)
             else:
-                result = prepare_temporal_replay('/run')
+                result = prepare_temporal_replay('/run', split_name=split_name)
                 self.assertEqual(labels.call_count, 1)
                 self.assertEqual(len(result.endpoint_times), 4)
                 np.testing.assert_array_equal(result.true_labels, [2] * 5)
+                self.assertEqual(result.config['replay_split'], split_name)
+                loader.assert_called_once_with('/run', 'auto', split_name=split_name)
+                return result
 
     def test_full_record_labels_computed_once_before_inference(self):
         self.replay()
 
     def test_corrupt_cached_inputs_rejected_before_inference(self):
         self.replay(corrupt=True)
+
+    def test_validation_replay_uses_selected_split_and_labels_the_plot(self):
+        replay = self.replay(split_name='val')
+        import matplotlib
+        matplotlib.use('Agg')
+        from matplotlib import pyplot as plt
+        from animate_kfall import KFallReplayPlayer
+        player = KFallReplayPlayer(replay, interactive=False)
+        try:
+            self.assertTrue(any('VAL · mejor checkpoint' in text.get_text() for text in player.figure.texts))
+        finally:
+            plt.close(player.figure)
 
 
 class DataIdentityAuditTests(unittest.TestCase):

@@ -198,6 +198,21 @@ python evaluate_kfall_temporal.py --run-dir runs/NOMBRE_TEMPORAL --device auto
 python animate_kfall_temporal.py --run-dir runs/NOMBRE_TEMPORAL --device auto
 ```
 
+Para ver los nombres reales disponibles antes de seleccionar una grabación:
+
+```bash
+python animate_kfall_temporal.py --run-dir runs/NOMBRE_TEMPORAL --list-recordings
+python animate_kfall_temporal.py --run-dir runs/NOMBRE_TEMPORAL --split val --list-recordings
+```
+
+El listado utiliza CPU y los índices guardados, sin abrir gráficos, leer CSV de
+señales ni ejecutar predicciones. Admite `--subject SA07` para filtrar. El visor
+utiliza test de forma predeterminada; `--split val` o `--split train` permite
+inspeccionar esas particiones y muestra su nombre en el gráfico. Si omites
+`--recording`, elige una grabación elegible automáticamente. Al elegir un CSV
+de otra partición, el error indica dónde está; las grabaciones sin una ventana
+completa para la configuración guardada no aparecen en el listado.
+
 El reproductor comparte la interfaz de señales/probabilidades/etiquetas reales,
 pero mantiene el estado durante toda la grabación. Opciones: `--recording`,
 `--subject`, `--paused`, `--sensor gyro`, `--time 5`,
