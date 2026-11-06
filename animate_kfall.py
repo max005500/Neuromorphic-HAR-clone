@@ -40,13 +40,13 @@ class KFallReplayPlayer:
         self.figure.subplots_adjust(left=0.085, right=0.97, top=0.815,
                                     bottom=0.19 if interactive else 0.11, hspace=0.32)
         self.figure.canvas.manager.set_window_title("KFall · predicción frente a etiqueta real")
-        self.figure.text(0.085, 0.966,
+        self.recording_text = self.figure.text(0.085, 0.966,
                          f"{replay.subject} · {replay.record['code']}/{replay.record['trial']} · "
                          f"{replay.config.get('replay_split', 'test').upper()} · mejor checkpoint: época {replay.best_epoch}", fontsize=15, weight="bold")
         self.prediction_text = self.figure.text(0.085, 0.925, "", fontsize=13, weight="bold")
         self.truth_text = self.figure.text(0.085, 0.892, "", fontsize=12)
         self.time_text = self.figure.text(0.085, 0.855, "", fontsize=9, color="#475569")
-        self.figure.text(0.085, 0.008,
+        self.footer_text = self.figure.text(0.085, 0.008,
                          "Reproducción de inferencias por ventanas: cada decisión se muestra al terminar su entrada y se mantiene hasta la siguiente. "
                          f"Etiquetado guardado: {replay.config.get('label_policy', 'legacy')}.",
                          fontsize=8, color="#475569")

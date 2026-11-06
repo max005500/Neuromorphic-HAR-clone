@@ -2,6 +2,8 @@
 """List or replay KFall recordings with explicit recurrent-state boundaries."""
 from __future__ import annotations
 import argparse
+from collections import OrderedDict
+import copy
 from pathlib import Path
 import numpy as np
 import torch
@@ -58,8 +60,16 @@ def prepare_temporal_replay(run_dir, *, recording=None, subject=None, device='au
                             split_name='test'):
     if split_name not in SPLITS:
         raise ValueError('Replay split must be train, val or test.')
-    model, cfg, saved, arrays, metadata, cache, dev, stats = load_temporal_run(run_dir, device, split_name=split_name)
-    episodes = EpisodeSet(arrays, metadata, boundary_ignore_seconds=cfg.boundary_ignore_seconds)
+    loaded = load_temporal_run(run_dir, device, split_name=split_name)
+    return _replay_from_loaded(run_dir, loaded, recording=recording, subject=subject,
+                               dataset_root=dataset_root, split_name=split_name)
+
+
+def _replay_from_loaded(run_dir, loaded, *, recording=None, subject=None, dataset_root=None,
+                        split_name='test', episodes=None):
+    model, cfg, saved, arrays, metadata, cache, dev, stats = loaded
+    episodes = (EpisodeSet(arrays, metadata, boundary_ignore_seconds=cfg.boundary_ignore_seconds)
+                if episodes is None else copy.copy(episodes))
     selected = _select_episodes(episodes, metadata, recording=recording, subject=subject, split_name=split_name)
     ep = next((ep for ep in selected if metadata['recordings'][ep.file_index]['label_id'] == 0), selected[0])
     record = metadata['recordings'][ep.file_index]
@@ -87,6 +97,55 @@ def prepare_temporal_replay(run_dir, *, recording=None, subject=None, device='au
         post_impact_end_time=impact + cfg.post_impact_seconds if impact is not None else None,
         true_labels=true, hierarchy_probabilities={key: result[key + '_probability']
             for key in ('group', 'normal', 'event')} if cfg.head_mode == 'hierarchical' else None)
+
+
+class TemporalReplaySource:
+    """One fixed checkpoint, lazy split arrays and a small recording replay cache."""
+    def __init__(self, run_dir, *, device='auto', dataset_root=None, split_name='test', max_cached_replays=3):
+        if split_name not in SPLITS or max_cached_replays < 1:
+            raise ValueError('Invalid replay partition or cache size.')
+        self.run_dir, self.dataset_root = Path(run_dir), dataset_root
+        self._base = load_temporal_run(run_dir, device, split_name=split_name)
+        self._loaded = {split_name: self._base}
+        self._episodes = {}
+        self._replays = OrderedDict()
+        self.max_cached_replays = max_cached_replays
+
+    def _context(self, split_name):
+        if split_name not in SPLITS:
+            raise ValueError('Replay split must be train, val or test.')
+        if split_name not in self._loaded:
+            from evaluation.kfall_data import load_evaluation_data
+            model, cfg, saved, _, _, cache, dev, stats = self._base
+            arrays, metadata, _, cache = load_evaluation_data(self.run_dir, saved['config'], cache,
+                                                             split_name=split_name)
+            self._loaded[split_name] = (model, cfg, saved, arrays, metadata, cache, dev, stats)
+        loaded = self._loaded[split_name]
+        if split_name not in self._episodes:
+            self._episodes[split_name] = EpisodeSet(loaded[3], loaded[4],
+                boundary_ignore_seconds=loaded[1].boundary_ignore_seconds)
+        return loaded, self._episodes[split_name]
+
+    def records(self, split_name):
+        loaded, episodes = self._context(split_name)
+        metadata = loaded[4]
+        return [dict(file=str(metadata['recordings'][ep.file_index]['file']).replace('\\', '/').rsplit('/', 1)[-1],
+                     subject=metadata['recordings'][ep.file_index]['subject'], windows=len(ep.indices),
+                     split=split_name) for ep in episodes.episodes]
+
+    def replay(self, split_name, *, recording=None, subject=None):
+        loaded, episodes = self._context(split_name)
+        selected = _select_episodes(episodes, loaded[4], recording=recording, subject=subject, split_name=split_name)
+        ep = next((ep for ep in selected if loaded[4]['recordings'][ep.file_index]['label_id'] == 0), selected[0])
+        key = (split_name, ep.file_index)
+        if key not in self._replays:
+            self._replays[key] = _replay_from_loaded(self.run_dir, loaded,
+                recording=loaded[4]['recordings'][ep.file_index]['file'], dataset_root=self.dataset_root,
+                split_name=split_name, episodes=episodes)
+            if len(self._replays) > self.max_cached_replays:
+                self._replays.popitem(last=False)
+        self._replays.move_to_end(key)
+        return self._replays[key]
 
 
 def main(argv=None):
@@ -121,10 +180,18 @@ def main(argv=None):
         parser.error('Se necesita un backend gráfico; usa --save-frame para exportar sin escritorio.')
     from matplotlib import pyplot as plt
     try:
-        replay = prepare_temporal_replay(args.run_dir, recording=args.recording, subject=args.subject,
-            device=args.device, dataset_root=args.dataset_root, split_name=args.split)
-        player = KFallReplayPlayer(replay, sensor=args.sensor, view_seconds=args.view_seconds,
-                                  speed=args.speed, interactive=args.save_frame is None)
+        if args.save_frame:
+            replay = prepare_temporal_replay(args.run_dir, recording=args.recording, subject=args.subject,
+                device=args.device, dataset_root=args.dataset_root, split_name=args.split)
+            player = KFallReplayPlayer(replay, sensor=args.sensor, view_seconds=args.view_seconds,
+                                      speed=args.speed, interactive=False)
+        else:
+            from visualization.kfall_temporal_browser import TemporalReplayBrowser
+            source = TemporalReplaySource(args.run_dir, device=args.device, dataset_root=args.dataset_root,
+                                           split_name=args.split)
+            replay = source.replay(args.split, recording=args.recording, subject=args.subject)
+            player = TemporalReplayBrowser(source, replay, sensor=args.sensor, view_seconds=args.view_seconds,
+                                            speed=args.speed, subject=args.subject)
         player.seek(args.time)
         if args.paused:
             player.playing = False; player._render()

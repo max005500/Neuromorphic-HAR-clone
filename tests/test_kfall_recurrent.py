@@ -101,6 +101,17 @@ class RecurrentTests(unittest.TestCase):
             replay = prepare_temporal_replay(run, device='cpu')
             self.assertTrue(np.isin(replay.predicted_classes, [0, 1, 2, 3]).all())
             self.assertEqual(len(replay.predicted_classes), len(replay.endpoint_times))
+            from animate_kfall_temporal import TemporalReplaySource
+            browser_source = TemporalReplaySource(run, device='cpu')
+            records = browser_source.records('test')
+            for row in records[:2]:
+                chosen = browser_source.replay('test', recording=row['file'])
+                fresh = prepare_temporal_replay(run, recording=row['file'], device='cpu')
+                np.testing.assert_array_equal(chosen.predicted_classes, fresh.predicted_classes)
+                np.testing.assert_allclose(chosen.probabilities, fresh.probabilities, rtol=0, atol=0)
+                self.assertIs(browser_source.replay('test', recording=row['file']), chosen)
+            self.assertEqual(browser_source.records('test'), records)
+            self.assertEqual(browser_source.records('val')[0]['split'], 'val')
             import csv
             with (run / 'metrics/validation/predictions.csv').open() as stream:
                 self.assertEqual(next(csv.DictReader(stream))['split'], 'val')

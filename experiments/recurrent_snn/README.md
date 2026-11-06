@@ -214,7 +214,17 @@ de otra partición, el error indica dónde está; las grabaciones sin una ventan
 completa para la configuración guardada no aparecen en el listado.
 
 El reproductor comparte la interfaz de señales/probabilidades/etiquetas reales,
-pero mantiene el estado durante toda la grabación. Opciones: `--recording`,
+con una lista lateral de grabaciones paginada: puedes buscar por nombre/tarea,
+filtrar sujeto y cambiar entre Test, Validación y Train desde la misma ventana.
+Seleccionar un CSV calcula sus predicciones en segundo plano y reinicia la
+memoria al comienzo de esa grabación; la reproducción nueva abre pausada. El
+checkpoint se carga una vez y se reutilizan las últimas tres reproducciones.
+Las particiones se abren bajo demanda. Si una selección falla, conserva la
+señal anterior y muestra el error en el panel. No hace falta `--recording` para
+navegar por los archivos. El modo `--save-frame` mantiene su exportación simple
+sin el panel lateral.
+
+El visor mantiene el estado durante toda la grabación. Opciones: `--recording`,
 `--subject`, `--paused`, `--sensor gyro`, `--time 5`,
 `--save-frame results/recurrent_preview.png`. La rejilla es la guardada al
 entrenar; no se altera la frecuencia recurrente al reproducir.
