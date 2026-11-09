@@ -278,6 +278,32 @@ python plot_training.py runs/kfall_scn_YYYYMMDD_HHMMSS
 
 KFall runs save the best validation checkpoint, history, test predictions, a classification report, confusion matrices, and dataset metadata. Cached events are read on demand during training to avoid converting the complete cache to floating-point tensors in RAM.
 
+### Optional PyTorch tensor cache
+
+Pass `--cache-format pt` to `train_kfall.py` or `run_kfall_experiments.py` to save
+`train.pt`, `val.pt`, and `test.pt` alongside the existing NPY event cache.
+Each file contains binary events as `uint8`, offsets, activity/posture targets,
+window indices, subjects, and the dataset metadata. Files are loaded using
+PyTorch's memory mapping; events are converted to floating point per batch by
+the existing training loop, rather than copied and converted per sample in CPU.
+DataLoader workers persist between epochs when `--workers` is positive.
+
+The PT cache is rebuilt when the source metadata or NPY file sizes/timestamps
+change. With/without-offset models reuse the same data, and the original NPY
+cache remains available for evaluation and the viewer. PT generation performs
+a one-time copy of one partition into RAM and adds a compact copy on disk; it
+does not eliminate the initial CPU Sigma-Delta preprocessing or speed up the
+network's sequential neuron updates. `--cache-format npy` preserves the
+original loading path.
+
+```bash
+python run_kfall_experiments.py --cache-format pt \
+  --split 0.6 0.3 0.1 --post-impact-seconds 1.2 \
+  --epochs 100 --batch-size 256 --workers 4 --gpu 0 --seed 0 \
+  --cache-dir data/kfall_cache_postimpact \
+  --output-dir results/kfall_postimpact_experiments_pt
+```
+
 ## KFall window-duration and offset ablation
 
 Run the controlled comparison for 1.20 s, 2.06 s, and 3.20 s windows, each

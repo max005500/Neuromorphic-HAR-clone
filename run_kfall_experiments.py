@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-manual-labels", action="store_true")
     parser.add_argument("--post-impact-seconds", type=float, default=1.2)
     parser.add_argument("--cache-dir", default="data/kfall_cache")
+    parser.add_argument("--cache-format", choices=("npy", "pt"), default="npy")
     parser.add_argument("--output-dir", default="results/kfall_window_experiments")
     parser.add_argument("--split", type=float, nargs=3, default=KFallEventLoaderConfig().split,
                         help="Subject fractions for train/validation/test (default 60/30/10).")
@@ -166,6 +167,7 @@ def main(argv: list[str] | None = None) -> None:
                 "--dataset-root", str(dataset_root),
                 "--cache-dir", str(cache_dir),
                 "--cache-name", cache_name,
+                "--cache-format", args.cache_format,
                 "--out-dir", str(run_parent),
                 "--run", run_name,
                 "--split", *(str(value) for value in args.split),

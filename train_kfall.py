@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from loaders.kfall_event_loader import CLASS_NAMES, KFallEventLoaderConfig, load_or_build_kfall_event_splits
 from loaders.utils import balanced_class_weights
+from loaders.kfall_tensor_cache import load_or_build_tensor_dataset
 from models.models import DualHeadSCN, SingleHeadSCN
 from preprocess.utils import named_class_counts
 from train_sisfall import run_epoch_dual
@@ -80,6 +81,8 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cache-dir", default="data/kfall_cache")
     p.add_argument("--cache-name", default="default")
     p.add_argument("--refresh-cache", action="store_true")
+    p.add_argument("--cache-format", choices=("npy", "pt"), default="npy",
+                   help="pt saves/reuses tensor views, avoiding per-sample NumPy copies (default npy).")
     p.add_argument("--preprocess-only", action="store_true", help="Build and inspect event splits without training.")
     p.add_argument("--split", type=float, nargs=3, default=list(defaults.split), metavar=("TRAIN", "VAL", "TEST"), help="Fractions of subjects; every subject belongs to exactly one split (default 60/30/10).")
     p.add_argument("--raw-win", type=int, default=defaults.raw_win, help="Raw window samples at 100 Hz (default 205).")
@@ -171,7 +174,12 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
     )
     if any(len(split["y_h1"]) == 0 for split in splits.values()):
         raise ValueError("Each training, validation, and test split must contain windows.")
-    datasets = {name: KFallTrainingDataset(split) for name, split in splits.items()}
+    if cfg.cache_format == "pt":
+        cache_root = Path(cfg.cache_dir) / f"kfall_event_loader_{cfg.cache_name}"
+        datasets = {name: load_or_build_tensor_dataset(cache_root, name, split)
+                    for name, split in splits.items()}
+    else:
+        datasets = {name: KFallTrainingDataset(split) for name, split in splits.items()}
     loaders = {
         name: DataLoader(
             dataset,
@@ -179,6 +187,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
             shuffle=name == "train",
             num_workers=cfg.workers,
             pin_memory=not cfg.no_pin_memory and dev.type == "cuda",
+            persistent_workers=cfg.workers > 0,
         )
         for name, dataset in datasets.items()
     }
