@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -15,8 +18,10 @@ from openpyxl import Workbook
 from loaders.kfall_event_loader import (
     KFallEventLoaderConfig, _source_signature, build_event_split, load_or_build_kfall_event_splits,
     signal_to_events, window_starts_for_record,
+    window_activity_labels,
 )
 from preprocess.preprocess_kfall import CHANNELS
+from labeling.kfall_manual_labels import load_manual_labels
 
 
 class KFallEventTests(unittest.TestCase):
@@ -137,6 +142,92 @@ class KFallEventTests(unittest.TestCase):
                         {"dead_zone": np.inf}, {"raw_win": 1}, {"fall_policy": "all"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(self.cfg, **changes)
+
+    def test_manual_labels_and_exact_postimpact_endpoint_interval(self):
+        record = np.zeros((700, 6), dtype=np.float32)
+        frames = np.arange(1, 701)
+        info = {
+            "label_id": 0, "subject": "SA06", "frames": frames,
+            "onset_idx": 399, "impact_idx": 449,
+            "fall_onset_frame": 400, "fall_impact_frame": 450,
+            "manual_intervals": [[1, 400, 1], [570, 701, 2]],
+        }
+        for raw_win in (120, 206, 320):
+            cfg = replace(self.cfg, raw_win=raw_win, stride=raw_win // 2, post_impact_seconds=1.2)
+            starts = window_starts_for_record(record, info, cfg)
+            endpoints = frames[starts + raw_win - 1]
+            labels = window_activity_labels(endpoints, info, cfg)
+            self.assertTrue(np.any(labels == 0))
+            self.assertTrue(np.any(labels == 3))
+            self.assertIn(569, endpoints)
+            self.assertTrue(np.all((endpoints[labels == 3] >= 450) & (endpoints[labels == 3] < 570)))
+            np.testing.assert_array_equal(
+                window_activity_labels(np.array([399, 400, 449, 450, 569, 570]), info, cfg),
+                [1, 0, 0, 3, 3, 2],
+            )
+        gap_info = {**info, "frames": np.array([i for i in frames if i != 569])}
+        gap_record = np.zeros((699, 6), dtype=np.float32)
+        cfg = replace(self.cfg, raw_win=120, post_impact_seconds=1.2)
+        ends = gap_info["frames"][window_starts_for_record(gap_record, gap_info, cfg) + 119]
+        self.assertIn(568, ends)
+
+    def test_postimpact_events_and_offsets_use_only_observed_window(self):
+        cfg = replace(self.cfg, post_impact_seconds=0.03)
+        records = np.empty(1, dtype=object)
+        records[0] = self.signal.copy()
+        before = build_event_split(records, np.array([0]), [self.info], [0], cfg, verbose=False)
+        np.testing.assert_array_equal(np.unique(before["y_h1"]), [0, 3])
+        post = before["y_h1"] == 3
+        self.assertTrue(np.isnan(before["lead_time_ms"][post]).all())
+        last = int(np.max(before["start"] + cfg.raw_win))
+        records[0][last:] = 1e9
+        after = build_event_split(records, np.array([0]), [self.info], [0], cfg, verbose=False)
+        np.testing.assert_array_equal(before["x_ev"], after["x_ev"])
+        np.testing.assert_array_equal(before["offset"], after["offset"])
+
+    def test_manual_annotation_changes_invalidate_cached_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_fixture(root)
+            path = root / "manual.json"
+            data = {
+                "format": "kfall_manual_normal_labels", "version": 1,
+                "dataset": "kfall", "sample_rate_hz": 100,
+                "recordings": {"SA06T01R01": {
+                    "file": "S06T01R01.csv", "reviewed": True,
+                    "intervals": [[101, 121, 1]],
+                }},
+            }
+            path.write_text(json.dumps(data))
+            with contextlib.redirect_stdout(io.StringIO()):
+                splits, metadata = load_or_build_kfall_event_splits(
+                    root, cache_dir=root / "cache", cfg=self.cfg,
+                    annotation_file=path, verbose=False,
+                )
+            self.assertIsNotNone(metadata["manual_annotation_signature"])
+            arrays = next(value for value in splits.values() if "SA06" in value["subject"])
+            recording_index = next(i for i, value in enumerate(metadata["recordings"])
+                                   if value["subject"] == "SA06" and value["task_id"] == 1)
+            self.assertTrue(np.all(arrays["y_h1"][arrays["file_idx"] == recording_index] == 1))
+            data["recordings"]["SA06T01R01"]["intervals"][0][2] = 2
+            path.write_text(json.dumps(data))
+            with patch("loaders.kfall_event_loader.load_kfall_3class", side_effect=RuntimeError("annotations changed")):
+                with self.assertRaisesRegex(RuntimeError, "annotations changed"):
+                    load_or_build_kfall_event_splits(
+                        root, cache_dir=root / "cache", cfg=self.cfg, annotation_file=path, verbose=False,
+                    )
+
+    def test_invalid_manual_intervals_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "manual.json"
+            for intervals in ([[1, 5, 3]], [[1, 5, 1], [4, 8, 2]], [[5, 5, 1]]):
+                path.write_text(json.dumps({
+                    "format": "kfall_manual_normal_labels", "version": 1,
+                    "dataset": "kfall", "sample_rate_hz": 100,
+                    "recordings": {"SA06T01R01": {"reviewed": True, "intervals": intervals}},
+                }))
+                with self.assertRaises(ValueError):
+                    load_manual_labels(path)
 
 
 if __name__ == "__main__":

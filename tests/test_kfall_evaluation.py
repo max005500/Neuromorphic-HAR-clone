@@ -26,12 +26,15 @@ class KFallEvaluationTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory()
         cls.directory = Path(cls.temporary.name)
         cls.fixtures = {}
-        for mode in ("single", "dual"):
+        for mode in ("single", "dual", "no_offset"):
             root = cls.directory / mode
             root.mkdir()
             write_fixture(root)
+            options = ["--head-mode", "dual"] if mode == "dual" else []
+            if mode == "no_offset":
+                options.append("--no-offset")
             with patch("train_kfall.get_device", return_value=torch.device("cpu")), contextlib.redirect_stdout(io.StringIO()):
-                train_main(fixture_args(root) + ["--head-mode", mode])
+                train_main(fixture_args(root) + options)
             run = next((root / "runs").iterdir())
             cache = root / "cache" / "kfall_event_loader_default"
             cls.fixtures[mode] = {
@@ -158,6 +161,12 @@ class KFallEvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["accuracy"], fixture["metrics"]["acc_h1"], places=7)
         self.assertAlmostEqual(metrics["loss"], fixture["metrics"]["loss"], places=6)
         self.assertNotIn("acc_h2", metrics)
+
+    def test_no_offset_checkpoint_reconstructs_and_evaluates(self):
+        fixture, destination, metrics = self.evaluate("no_offset")
+        np.testing.assert_array_equal(np.load(destination / "y_true.npy"), fixture["truth"])
+        np.testing.assert_array_equal(np.load(destination / "y_pred.npy"), fixture["prediction"])
+        self.assertEqual(metrics["n"], len(fixture["truth"]))
 
     def test_cli_can_evaluate_an_explicit_checkpoint(self):
         from evaluate_kfall import main

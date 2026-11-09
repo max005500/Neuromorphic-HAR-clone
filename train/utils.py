@@ -128,6 +128,7 @@ def scn_model_kwargs(cfg: Any) -> dict[str, Any]:
         offset_hidden=cfg.offset_hidden,
         offset_scale=1.0,
         offset_drop=0.0,
+        use_offset=getattr(cfg, "use_offset", True),
         spiking_heads=cfg.spiking_heads,
         head_rate_scale=cfg.head_rate_scale,
         use_bn=True,

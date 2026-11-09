@@ -12,7 +12,7 @@ import numpy as np
 from visualization.kfall_data import KFallWindowStore
 from visualization.kfall_plotting import draw_window
 
-CLASS_FILTERS = {"Todas": None, "Fall": 0, "Dynamic": 1, "Static": 2}
+CLASS_FILTERS = {"Todas": None, "Fall": 0, "Dynamic": 1, "Static": 2, "PostImpact": 3}
 SENSOR_FILTERS = {"Acelerómetro": "acc", "Giroscopio": "gyro"}
 
 
@@ -106,6 +106,8 @@ class KFallViewer:
         if window.fall_onset_time is not None:
             lines.append(f"Inicio de caída: {window.fall_onset_time:.3f} s · impacto anotado: {window.fall_impact_time:.3f} s · "
                          f"tiempo restante al impacto: {window.lead_time_ms:.1f} ms")
+        elif window.class_id == 3:
+            lines.append(f"Postimpacto: impacto anotado a {window.fall_impact_time:.3f} s en esta ventana.")
         else:
             lines.append("Actividad cotidiana: sin anotación temporal de caída.")
         self.details.set_text("\n".join(lines))
@@ -257,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", type=Path, default=None, help="Override the KFall source root if the dataset has moved.")
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--sensor", choices=["acc", "gyro"], default="acc")
-    parser.add_argument("--class", dest="class_filter", choices=["all", "fall", "dynamic", "static"], default="all")
+    parser.add_argument("--class", dest="class_filter", choices=["all", "fall", "dynamic", "static", "postimpact"], default="all")
     parser.add_argument("--subject", default=None, help="Filter by subject ID, e.g. SA06.")
     parser.add_argument("--window", type=int, default=None, help="Actual zero-based window index within the selected split.")
     parser.add_argument("--no-reconstruction", action="store_true", help="Hide the reconstructed signal overlay.")
@@ -280,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         store = KFallWindowStore(args.cache_dir, dataset_root=args.dataset_root)
-        class_id = {"all": None, "fall": 0, "dynamic": 1, "static": 2}[args.class_filter]
+        class_id = {"all": None, "fall": 0, "dynamic": 1, "static": 2, "postimpact": 3}[args.class_filter]
         viewer = KFallViewer(store, split=args.split, sensor=args.sensor, class_id=class_id,
                              subject=args.subject, index=args.window, show_reconstruction=not args.no_reconstruction,
                              interactive=args.save is None, export_dir=args.export_dir)

@@ -28,15 +28,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from loaders.kfall_event_loader import KFallEventLoaderConfig, load_or_build_kfall_event_splits
+from loaders.kfall_event_loader import CLASS_NAMES, KFallEventLoaderConfig, load_or_build_kfall_event_splits
 from loaders.utils import balanced_class_weights
 from models.models import DualHeadSCN, SingleHeadSCN
 from preprocess.utils import named_class_counts
 from train_sisfall import run_epoch_dual
 from train_ucihar import run_epoch as run_epoch_single
-
-
-CLASS_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static"}
 
 
 class KFallTrainingDataset(Dataset):
@@ -50,7 +47,7 @@ class KFallTrainingDataset(Dataset):
         if split["x_ev"].ndim != 4 or split["x_ev"].shape[2:] != (6, 2):
             raise ValueError("KFall events must have shape (N, Te, 6, 2).")
         if not np.isin(split["y_h1"], list(CLASS_NAMES)).all():
-            raise ValueError("KFall activity labels must be Fall=0, Dynamic=1, or Static=2.")
+            raise ValueError("KFall activity labels must be Fall=0, Dynamic=1, Static=2 or PostImpact=3.")
 
     def __len__(self) -> int:
         return len(self.split["y_h1"])
@@ -73,20 +70,29 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset-root", default="data/KFall", help="KFall root containing sensor_data and label_data.")
     p.add_argument("--label-dir", default=None, help="Override the directory containing subject XLSX annotations.")
+    annotation_root = Path(__file__).resolve().parent / "annotations"
+    annotation_default = next((path for path in (
+        annotation_root / "kfall_manual_labels.json", annotation_root / "kfall_manual_labels.json.bak",
+    ) if path.is_file()), None)
+    p.add_argument("--annotation-file", default=None if annotation_default is None else str(annotation_default),
+                   help="Manual normal-activity labels; defaults to annotations JSON (or its .bak).")
+    p.add_argument("--no-manual-labels", action="store_true", help="Use the original task grouping instead of manual normal intervals.")
     p.add_argument("--cache-dir", default="data/kfall_cache")
     p.add_argument("--cache-name", default="default")
     p.add_argument("--refresh-cache", action="store_true")
     p.add_argument("--preprocess-only", action="store_true", help="Build and inspect event splits without training.")
-    p.add_argument("--split", type=float, nargs=3, default=[0.8, 0.1, 0.1], metavar=("TRAIN", "VAL", "TEST"), help="Fractions of subjects; every subject belongs to exactly one split.")
+    p.add_argument("--split", type=float, nargs=3, default=list(defaults.split), metavar=("TRAIN", "VAL", "TEST"), help="Fractions of subjects; every subject belongs to exactly one split (default 60/30/10).")
     p.add_argument("--raw-win", type=int, default=defaults.raw_win, help="Raw window samples at 100 Hz (default 205).")
     p.add_argument("--out-win", type=int, default=defaults.out_win, help="Event time steps after interpolation (default 2048).")
     p.add_argument("--stride", type=int, default=defaults.stride, help="Stride in raw samples.")
     p.add_argument("--fall-policy", choices=["pre_impact", "annotated_interval"], default=defaults.fall_policy, help="pre_impact excludes the impact sample; annotated_interval can include it.")
+    p.add_argument("--post-impact-seconds", type=float, default=1.2,
+                   help="PostImpact endpoint interval after impact (default 1.2 s); 0 retains three classes.")
     p.add_argument("--theta", type=float, nargs=6, default=list(defaults.theta_sd), help="Initial encoder thresholds in g (first three) and deg/s (last three); tune using training subjects.")
     p.add_argument("--dead-zone", type=float, default=defaults.dead_zone)
     p.add_argument("--sd-init", choices=["x0", "zero"], default=defaults.sd_init)
 
-    p.add_argument("--head-mode", choices=["single", "dual"], default="single", help="Three-class single head, or dual architecture with the unannotated posture head disabled.")
+    p.add_argument("--head-mode", choices=["single", "dual"], default="single", help="Activity single head, or dual architecture with the unannotated posture head disabled.")
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--run", default="kfall_scn")
     p.add_argument("--epochs", type=int, default=100)
@@ -119,6 +125,8 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--p-drop", type=float, default=0.35)
     p.add_argument("--merge-polarities", action="store_true")
     p.add_argument("--offset-hidden", type=int, default=8)
+    p.add_argument("--no-offset", dest="use_offset", action="store_false", default=True,
+                   help="Remove the auxiliary offset branch before the classifier.")
     p.add_argument("--head-rate-scale", type=float, default=8.0)
     p.add_argument("--spiking-heads", action=argparse.BooleanOptionalAction, default=False)
     cfg = p.parse_args(argv)
@@ -126,7 +134,9 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("epochs and batch-size must be positive; workers must be nonnegative.")
     cfg.n_ch = 6
     cfg.dataset = "kfall"
-    cfg.n_classes = 3
+    cfg.n_classes = 4 if cfg.post_impact_seconds > 0 else 3
+    if cfg.no_manual_labels:
+        cfg.annotation_file = None
     cfg.lambda_h1 = 1.0
     cfg.lambda_h2 = 0.0
     cfg.use_ambiguous = False
@@ -146,6 +156,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         dead_zone=cfg.dead_zone,
         sd_init=cfg.sd_init,
         fall_policy=cfg.fall_policy,
+        post_impact_seconds=cfg.post_impact_seconds,
     )
     splits, metadata = load_or_build_kfall_event_splits(
         dataset_root=cfg.dataset_root,
@@ -156,6 +167,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         refresh=cfg.refresh_cache,
         mmap_mode="r",
         verbose=not cfg.quiet_loader,
+        annotation_file=cfg.annotation_file,
     )
     if any(len(split["y_h1"]) == 0 for split in splits.values()):
         raise ValueError("Each training, validation, and test split must contain windows.")
@@ -176,8 +188,8 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
 def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
     kwargs = scn_model_kwargs(cfg)
     if cfg.head_mode == "single":
-        return SingleHeadSCN(n_classes=3, **kwargs).to(dev)
-    model = DualHeadSCN(n_classes_head1=3, **kwargs).to(dev)
+        return SingleHeadSCN(n_classes=cfg.n_classes, **kwargs).to(dev)
+    model = DualHeadSCN(n_classes_head1=cfg.n_classes, **kwargs).to(dev)
     posture_head = model.head2_spk if cfg.spiking_heads else model.head2
     for param in posture_head.parameters():
         param.requires_grad_(False)
@@ -188,7 +200,9 @@ def main(argv: list[str] | None = None) -> None:
     cfg = get_args(argv)
     set_seed(cfg.seed)
     dev = get_device(cfg.gpu)
+    print(f"[labels] manual={cfg.annotation_file or 'disabled (task grouping)'} | post_impact_seconds={cfg.post_impact_seconds}")
     data = build_data(cfg, dev)
+    class_names = {key: CLASS_NAMES[key] for key in range(cfg.n_classes)}
     for name, split in data["splits"].items():
         subjects = data["metadata"].get("split_subjects", {}).get(name, [])
         print(f"[data:{name}] subjects={subjects} | N={len(split['y_h1'])} | counts={named_class_counts(split['y_h1'], CLASS_NAMES)}")
@@ -218,11 +232,11 @@ def main(argv: list[str] | None = None) -> None:
 
     class_weight = None
     if cfg.class_weight == "balanced":
-        weights = balanced_class_weights(data["splits"]["train"]["y_h1"], n_classes=3)
+        weights = balanced_class_weights(data["splits"]["train"]["y_h1"], n_classes=cfg.n_classes)
         class_weight = torch.as_tensor(weights, dtype=torch.float32, device=dev)
     model = build_model(cfg, dev)
     total, trainable = count_parameters(model)
-    print_kv_block("run", [("dataset", "KFall"), ("device", dev), ("run_dir", run_dir), ("head_mode", cfg.head_mode), ("fall_policy", cfg.fall_policy), ("params", total), ("trainable", trainable)])
+    print_kv_block("run", [("dataset", "KFall"), ("device", dev), ("run_dir", run_dir), ("head_mode", cfg.head_mode), ("fall_policy", cfg.fall_policy), ("use_offset", cfg.use_offset), ("params", total), ("trainable", trainable)])
     if cfg.head_mode == "dual":
         print("[head2] No temporal posture labels are available in KFall; posture loss and head parameters are disabled.")
 
@@ -264,13 +278,14 @@ def main(argv: list[str] | None = None) -> None:
     else:
         y_true = test_metrics.pop("y_true")
         y_pred = test_metrics.pop("y_pred")
-    save_classification_outputs(metrics_dir, y_true=y_true, y_pred=y_pred, labels=list(CLASS_NAMES), names=list(CLASS_NAMES.values()))
+    save_classification_outputs(metrics_dir, y_true=y_true, y_pred=y_pred, labels=list(class_names), names=list(class_names.values()))
     test_metrics.update(
         best_val_loss=float(fit_result["best_val"]),
         best_epoch=int(checkpoint.get("epoch", -1)),
         total_time_sec=float(time.time() - fit_result["started_at"]),
         class_counts_test=named_class_counts(y_true, CLASS_NAMES),
         head2_supervised=False,
+        use_offset=cfg.use_offset,
     )
     save_json(metrics_dir / "test_metrics.json", test_metrics)
     print(json.dumps(json_ready(test_metrics), indent=2, ensure_ascii=False))

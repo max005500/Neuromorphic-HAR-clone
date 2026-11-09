@@ -2,7 +2,8 @@
 
 The prediction time is the final sample of each window. In ``pre_impact``
 mode it must be at or after onset and strictly before impact. Interpolation
-and offsets use only samples inside that window.
+and offsets use only samples inside that window. Optional manual normal labels
+and a post-impact endpoint interval extend the activity classification.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from loaders import utils as u
+from labeling.kfall_manual_labels import load_manual_labels
 from preprocess.event_encoding import sigma_delta
 from preprocess.interpolate_signal import interpolate_to_times
 from preprocess.preprocess_kfall import load_kfall_3class
@@ -29,18 +31,20 @@ ARRAY_KEYS = (
     "start", "subject", "end_frame", "lead_time_ms",
 )
 DEFAULT_THETA_KFALL = (0.1, 0.1, 0.1, 10.0, 10.0, 10.0)
+CLASS_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static", 3: "PostImpact"}
 
 
 @dataclass(frozen=True)
 class KFallEventLoaderConfig:
     seed: int = 0
-    split: tuple[float, float, float] = (0.8, 0.1, 0.1)
+    split: tuple[float, float, float] = (0.6, 0.3, 0.1)
     raw_win: int = 205
     out_win: int = 2048
     stride: int = 102
     n_ch: int = 6
     sample_rate_hz: float = 100.0
     fall_policy: str = "pre_impact"
+    post_impact_seconds: float = 0.0
     theta_sd: tuple[float, ...] = DEFAULT_THETA_KFALL
     dead_zone: float = 0.5
     sd_init: str = "x0"
@@ -65,6 +69,33 @@ class KFallEventLoaderConfig:
             raise ValueError("sd_init must be 'x0' or 'zero'.")
         if self.fall_policy not in {"pre_impact", "annotated_interval"}:
             raise ValueError("fall_policy must be 'pre_impact' or 'annotated_interval'.")
+        if (not np.isfinite(self.post_impact_seconds) or self.post_impact_seconds < 0
+                or not np.isclose(self.post_impact_seconds * 100, round(self.post_impact_seconds * 100))):
+            raise ValueError("post_impact_seconds must be nonnegative and resolve to whole 100 Hz frames.")
+
+
+def window_activity_labels(
+    end_frames: np.ndarray, meta: dict[str, Any], cfg: KFallEventLoaderConfig,
+) -> np.ndarray:
+    """Label endpoints; official fall/post-impact intervals override manual labels."""
+    end_frames = np.asarray(end_frames)
+    labels = np.full(end_frames.shape, -1, dtype=np.int64)
+    intervals = meta.get("manual_intervals")
+    if intervals is not None:
+        for start, stop, label in intervals:
+            labels[(end_frames >= start) & (end_frames < stop)] = label
+    elif int(meta["label_id"]) != 0:
+        labels[:] = int(meta["label_id"])
+    if int(meta["label_id"]) == 0:
+        onset, impact = int(meta["fall_onset_frame"]), int(meta["fall_impact_frame"])
+        fall = (end_frames >= onset) & (end_frames < impact if cfg.fall_policy == "pre_impact" else end_frames <= impact)
+        labels[fall] = 0
+        if cfg.post_impact_seconds:
+            post = (end_frames >= impact) & (end_frames < impact + round(cfg.post_impact_seconds * 100))
+            if cfg.fall_policy == "annotated_interval":
+                post &= end_frames > impact
+            labels[post] = 3
+    return labels
 
 
 def window_starts_for_record(
@@ -75,6 +106,19 @@ def window_starts_for_record(
     if length < cfg.raw_win:
         return np.empty(0, dtype=np.int64)
     starts = np.arange(0, length - cfg.raw_win + 1, cfg.stride, dtype=np.int64)
+    if cfg.post_impact_seconds or "manual_intervals" in meta:
+        frames = np.asarray(meta.get("frames", meta.get("frame_grid", np.arange(1, length + 1))), dtype=np.int64)
+        if int(meta["label_id"]) == 0:
+            impact = int(meta["fall_impact_frame"])
+            last_fall = impact - (1 if cfg.fall_policy == "pre_impact" else 0)
+            endpoints = [int(np.searchsorted(frames, last_fall, side="right")) - 1]
+            if cfg.post_impact_seconds:
+                post_stop = impact + round(cfg.post_impact_seconds * 100)
+                endpoints.append(int(np.searchsorted(frames, post_stop, side="left")) - 1)
+            anchors = [end - cfg.raw_win + 1 for end in endpoints if end >= cfg.raw_win - 1]
+            starts = np.unique(np.concatenate((starts, np.asarray(anchors, dtype=np.int64))))
+        labels = window_activity_labels(frames[starts + cfg.raw_win - 1], meta, cfg)
+        return starts[labels >= 0]
     if int(meta["label_id"]) != 0:
         return starts
 
@@ -144,7 +188,9 @@ def build_event_split(
             end_frame = int(frames[stop - 1])
             arrays["x_ev"][cursor] = events
             arrays["offset"][cursor] = offset
-            arrays["y_h1"][cursor] = int(labels[fi])
+            activity = (int(window_activity_labels(np.array([end_frame]), info, cfg)[0])
+                        if cfg.post_impact_seconds or "manual_intervals" in info else int(labels[fi]))
+            arrays["y_h1"][cursor] = activity
             # KFall supplies fall timing, not temporal posture-transition labels.
             arrays["y_h2"][cursor] = 0.5
             arrays["src_h2"][cursor] = 0
@@ -155,7 +201,7 @@ def build_event_split(
             arrays["end_frame"][cursor] = end_frame
             arrays["lead_time_ms"][cursor] = (
                 (int(info["fall_impact_frame"]) - end_frame) * 1000.0 / cfg.sample_rate_hz
-                if int(labels[fi]) == 0 else np.nan
+                if activity == 0 else np.nan
             )
             cursor += 1
             if verbose and cfg.verbose_every and cursor % cfg.verbose_every == 0:
@@ -189,6 +235,7 @@ def load_or_build_kfall_event_splits(
     cache_dir: str | os.PathLike[str] = "data/kfall_cache", run_name: str = "default",
     cfg: KFallEventLoaderConfig | None = None, refresh: bool = False,
     mmap_mode: str | None = None, verbose: bool = True,
+    annotation_file: str | os.PathLike[str] | None = None,
 ) -> tuple[dict[str, dict[str, np.ndarray]], dict[str, Any]]:
     """Split subjects before windowing, then build or reuse a source-aware cache."""
     cfg = KFallEventLoaderConfig() if cfg is None else cfg
@@ -203,14 +250,49 @@ def load_or_build_kfall_event_splits(
         "dataset_root": str(root.resolve()), "label_dir": str(labels_root.resolve()),
         "config": asdict(cfg), "source_signature": _source_signature(root, labels_root),
     }
+    manual_records = None
+    if annotation_file is not None:
+        manual_records, signature = load_manual_labels(annotation_file)
+        expected["manual_annotation_signature"] = signature
+    else:
+        expected["manual_annotation_signature"] = None
     output = Path(cache_dir) / f"kfall_event_loader_{run_name}"
     if not refresh and u.event_cache_is_valid(
         output, output / "metadata.json", expected, split_names=SPLIT_NAMES, array_keys=ARRAY_KEYS,
-        metadata_keys=("version", "dataset_root", "label_dir", "config", "source_signature"),
+        metadata_keys=("version", "dataset_root", "label_dir", "config", "source_signature", "manual_annotation_signature"),
     ):
         return load_event_splits(output, mmap_mode, verbose), u.load_json(output / "metadata.json")
 
     recordings, labels, records, skipped = load_kfall_3class(root, label_dir=labels_root)
+    if manual_records is not None:
+        matched = set()
+        missing = []
+        for record in records:
+            key = f"{record['subject']}{record['code']}{record['trial']}"
+            if key not in manual_records:
+                missing.append(key)
+                continue
+            entry = manual_records[key]
+            if entry.get("file") != Path(record["file"]).name:
+                raise ValueError(f"Manual annotation filename mismatch for {key}.")
+            frames = record["frames"]
+            for start, stop, _ in entry["intervals"]:
+                if start < int(frames[0]) or stop > int(frames[-1]) + 1:
+                    raise ValueError(f"Manual annotation frames outside recording {key}.")
+            record["manual_intervals"] = entry["intervals"]
+            matched.add(key)
+        if set(manual_records) - matched:
+            raise ValueError("Manual annotation file contains recordings absent from this dataset.")
+        if not matched:
+            raise ValueError("Manual annotation file does not match any dataset recordings.")
+        if missing:
+            print(f"[labels:warning] No manual labels for {len(missing)} recordings; using task/official fall labels: {missing}")
+    else:
+        missing = []
+    for record in records:
+        frames = record["frames"]
+        if int(frames[0]) != 1 or np.any(np.diff(frames) != 1):
+            record["frame_grid"] = frames.tolist()
     indices = subject_split_indices([record["subject"] for record in records], cfg.split, cfg.seed)
     if any(not len(index) for index in indices):
         raise ValueError("KFall training requires nonempty train, validation and test subject groups.")
@@ -225,6 +307,8 @@ def load_or_build_kfall_event_splits(
         "channels": ["AccX", "AccY", "AccZ", "GyrX", "GyrY", "GyrZ"],
         "units": ["g", "g", "g", "degrees/s", "degrees/s", "degrees/s"],
         "head2_labels_available": False,
+        "manual_annotation_missing_recordings": missing,
+        "class_names": CLASS_NAMES if cfg.post_impact_seconds else {key: value for key, value in CLASS_NAMES.items() if key < 3},
         "fall_label_rule": "onset <= final frame < impact" if cfg.fall_policy == "pre_impact"
                            else "onset <= final frame <= impact",
         "split_summary": {},

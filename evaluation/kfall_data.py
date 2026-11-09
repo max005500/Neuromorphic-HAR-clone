@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from loaders.kfall_event_loader import KFallEventLoaderConfig, window_starts_for_record
+from loaders.kfall_event_loader import KFallEventLoaderConfig, window_activity_labels, window_starts_for_record
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -52,7 +52,7 @@ def _data_config(metadata: dict[str, Any]) -> dict[str, Any]:
     config = metadata.get("config")
     if not isinstance(config, dict):
         raise ValueError("KFall evaluation metadata has no preprocessing config.")
-    return {key: value for key, value in config.items() if key not in RUNTIME_CONFIG}
+    return {"post_impact_seconds": 0.0, **{key: value for key, value in config.items() if key not in RUNTIME_CONFIG}}
 
 
 def _record_identity(record: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +140,10 @@ def load_evaluation_data(
             raise ValueError(f"Checkpoint {saved_key} differs from the training dataset config.")
     if checkpoint_config.get("dataset", "kfall") != "kfall":
         raise ValueError("The checkpoint belongs to a different dataset.")
+    if checkpoint_config.get("post_impact_seconds", 0.0) != config["post_impact_seconds"]:
+        raise ValueError("Checkpoint post_impact_seconds differs from the training dataset config.")
+    if run_metadata.get("manual_annotation_signature") != cache_metadata.get("manual_annotation_signature"):
+        raise ValueError("Event cache manual annotations differ from the training snapshot.")
     for key in ("version", "source_signature", "channels", "units", "fall_label_rule", "head2_labels_available", "raw_data", "split_summary", "split_file_indices"):
         if key not in run_metadata or key not in cache_metadata or run_metadata[key] != cache_metadata[key]:
             raise ValueError(f"Event cache {key} differs from the training snapshot.")
@@ -174,8 +178,9 @@ def load_evaluation_data(
         raise ValueError("Test end_frame must contain positive FrameCounter values.")
     if arrays["x_ev"].dtype != np.uint8:
         raise ValueError("Test x_ev must contain uint8 binary events.")
-    if not np.isin(arrays["y_h1"], (0, 1, 2)).all():
-        raise ValueError("Test activity labels must be Fall=0, Dynamic=1, or Static=2.")
+    n_classes = 4 if cfg.post_impact_seconds > 0 else 3
+    if not np.isin(arrays["y_h1"], range(n_classes)).all():
+        raise ValueError("Test activity labels disagree with the configured KFall classes.")
     for key in ("offset", "y_h2", "w_h2"):
         if not np.isfinite(arrays[key]).all():
             raise ValueError(f"Test {key} contains non-finite values.")
@@ -200,15 +205,22 @@ def load_evaluation_data(
     for index in np.unique(arrays["file_idx"]):
         record = records[int(index)]
         mask = arrays["file_idx"] == index
-        if not np.all(arrays["subject"][mask] == record["subject"]) or not np.all(arrays["y_h1"][mask] == record["label_id"]):
+        if not np.all(arrays["subject"][mask] == record["subject"]):
             raise ValueError("Test window subject/activity labels disagree with their source recording.")
+        endpoints = arrays["end_frame"][mask]
+        expected_labels = window_activity_labels(endpoints, record, cfg)
+        if not np.array_equal(arrays["y_h1"][mask], expected_labels):
+            raise ValueError("Test window activity labels disagree with the temporal annotations.")
         if int(record["label_id"]) == 0:
-            endpoints = arrays["end_frame"][mask]
+            fall_mask = arrays["y_h1"][mask] == 0
+            fall_endpoints = endpoints[fall_mask]
             onset, impact = int(record["fall_onset_frame"]), int(record["fall_impact_frame"])
-            valid = (endpoints >= onset) & (endpoints < impact if cfg.fall_policy == "pre_impact" else endpoints <= impact)
-            lead = (impact - endpoints) * 1000.0 / cfg.sample_rate_hz
-            if not valid.all() or not np.allclose(arrays["lead_time_ms"][mask], lead):
+            valid = (fall_endpoints >= onset) & (fall_endpoints < impact if cfg.fall_policy == "pre_impact" else fall_endpoints <= impact)
+            lead = (impact - fall_endpoints) * 1000.0 / cfg.sample_rate_hz
+            if not valid.all() or not np.allclose(arrays["lead_time_ms"][mask][fall_mask], lead):
                 raise ValueError("Test fall windows violate their annotated temporal policy.")
+            if not np.isnan(arrays["lead_time_ms"][mask][~fall_mask]).all():
+                raise ValueError("Non-fall test windows must not have an annotated impact lead time.")
         elif not np.isnan(arrays["lead_time_ms"][mask]).all():
             raise ValueError("Non-fall test windows must not have an annotated impact lead time.")
     counts = {str(label): int(np.sum(arrays["y_h1"] == label)) for label in np.unique(arrays["y_h1"])}

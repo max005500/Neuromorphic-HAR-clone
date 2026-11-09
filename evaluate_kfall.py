@@ -54,8 +54,10 @@ def _load_checkpoint(path: Path) -> tuple[dict[str, Any], SimpleNamespace]:
     if not isinstance(checkpoint.get("model_state_dict"), dict):
         raise ValueError("Checkpoint has no model_state_dict.")
     cfg = SimpleNamespace(**checkpoint["config"])
-    if getattr(cfg, "dataset", None) != "kfall" or getattr(cfg, "n_classes", None) != 3:
-        raise ValueError("Use a KFall checkpoint trained with the three activity classes.")
+    if getattr(cfg, "dataset", None) != "kfall" or getattr(cfg, "n_classes", None) not in (3, 4):
+        raise ValueError("Use a KFall checkpoint trained with three or four activity classes.")
+    if cfg.n_classes != (4 if getattr(cfg, "post_impact_seconds", 0.0) > 0 else 3):
+        raise ValueError("Checkpoint class count disagrees with its post-impact configuration.")
     if getattr(cfg, "head_mode", None) not in {"single", "dual"}:
         raise ValueError("Checkpoint head_mode must be single or dual.")
     required = (
@@ -133,8 +135,8 @@ def evaluate_run(
         if weight is None:
             raise ValueError("Checkpoint is missing its training class weights; they cannot be estimated from test.")
         class_weight = torch.as_tensor(weight, dtype=torch.float32, device=dev)
-        if class_weight.shape != (3,) or not torch.isfinite(class_weight).all() or torch.any(class_weight <= 0):
-            raise ValueError("Checkpoint training class weights must contain three finite positive values.")
+        if class_weight.shape != (cfg.n_classes,) or not torch.isfinite(class_weight).all() or torch.any(class_weight <= 0):
+            raise ValueError("Checkpoint class weights must contain one finite positive value per class.")
     elif cfg.class_weight != "none":
         raise ValueError(f"Unknown checkpoint class weighting: {cfg.class_weight}.")
 
@@ -153,8 +155,8 @@ def evaluate_run(
                 # extract_single_logits also selects Head 1 of the optional
                 # dual architecture; KFall supplies no posture-head targets.
                 logits = extract_single_logits(model(events, offset=offsets))
-                if logits.shape != (len(target), 3) or not torch.isfinite(logits).all():
-                    raise ValueError("The checkpoint produced invalid three-class logits.")
+                if logits.shape != (len(target), cfg.n_classes) or not torch.isfinite(logits).all():
+                    raise ValueError("The checkpoint produced logits incompatible with its class count.")
                 loss = F.cross_entropy(logits, target, weight=class_weight,
                                        label_smoothing=float(cfg.label_smoothing))
             loss_sum += float(loss.item()) * len(target)
@@ -175,6 +177,8 @@ def evaluate_run(
         "training_class_weights": None if class_weight is None else class_weight.detach().cpu().tolist(),
         "label_smoothing": float(cfg.label_smoothing), "head_mode": cfg.head_mode,
         "head2_supervised": False, "fall_policy": cfg.fall_policy,
+        "post_impact_seconds": getattr(cfg, "post_impact_seconds", 0.0),
+        "class_names": [CLASS_NAMES[key] for key in range(cfg.n_classes)],
         "selection": "full_test" if subject is None and window is None else "test_subset",
         "test_subjects": test_subjects,
         "all_test_subjects": run_metadata["split_subjects"]["test"],
@@ -188,7 +192,7 @@ def evaluate_run(
         summary["selected_window"] = {
             "index": int(indices[0]), "subject": str(split["subject"][indices[0]]),
             "true": CLASS_NAMES[int(y_true[0])], "predicted": CLASS_NAMES[prediction],
-            "probabilities": {name: float(probability[0, key]) for key, name in CLASS_NAMES.items()},
+            "probabilities": {CLASS_NAMES[key]: float(probability[0, key]) for key in range(cfg.n_classes)},
         }
     return save_evaluation_reports(destination, y_true=y_true, probabilities=probability,
                                    window_indices=indices, split=split, metadata=metadata, summary=summary)

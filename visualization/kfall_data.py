@@ -11,12 +11,11 @@ from typing import Any
 
 import numpy as np
 
-from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events
+from loaders.kfall_event_loader import CLASS_NAMES, KFallEventLoaderConfig, signal_to_events, window_activity_labels
 from preprocess.interpolate_signal import interpolate_to_times
 from preprocess.preprocess_kfall import load_record
 
 
-CLASS_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static"}
 SPLIT_NAMES = ("train", "val", "test")
 ARRAY_KEYS = ("x_ev", "offset", "y_h1", "file_idx", "start", "subject", "end_frame", "lead_time_ms")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +121,7 @@ class KFallWindowStore:
         mask = np.ones(len(arrays["y_h1"]), dtype=bool)
         if class_id is not None:
             if class_id not in CLASS_NAMES:
-                raise ValueError("class_id must be 0 (Fall), 1 (Dynamic), or 2 (Static).")
+                raise ValueError("class_id must be 0 (Fall), 1 (Dynamic), 2 (Static), or 3 (PostImpact).")
             mask &= arrays["y_h1"] == class_id
         if subject is not None and str(subject).strip().lower() not in {"", "all", "todos"}:
             match = re.fullmatch(r"(?:SA|S)?(\d{1,2})", str(subject).strip().upper())
@@ -171,13 +170,16 @@ class KFallWindowStore:
         for key in ("subject", "code", "trial", "label_id"):
             if source[key] != record[key]:
                 raise ValueError(f"Source CSV {path.name} does not match cached recording metadata ({key}).")
-        if class_id not in CLASS_NAMES or class_id != record["label_id"] or subject != record["subject"]:
+        if class_id not in CLASS_NAMES or subject != record["subject"]:
             raise ValueError(f"Cached window {split}[{index}] has inconsistent subject or activity labels.")
         start = int(arrays["start"][index])
         stop = start + self.cfg.raw_win
         if start < 0 or stop > len(signal):
             raise ValueError(f"Cached window {split}[{index}] is outside source CSV {path.name}.")
         raw, frames = signal[start:stop], all_frames[start:stop]
+        expected_class = int(window_activity_labels(np.array([frames[-1]]), record, self.cfg)[0])
+        if class_id != expected_class:
+            raise ValueError(f"Cached window {split}[{index}] disagrees with its temporal activity labels.")
         events = np.asarray(arrays["x_ev"][index])
         offset = np.asarray(arrays["offset"][index])
         if not np.isin(events, (0, 1)).all():
@@ -216,6 +218,8 @@ class KFallWindowStore:
             expected_lead = (impact - int(frames[-1])) * 1000.0 / self.cfg.sample_rate_hz
             if not np.isfinite(lead_time) or not np.isclose(lead_time, expected_lead):
                 raise ValueError(f"Cached lead time does not match fall annotations for {split}[{index}].")
+        elif class_id == 3:
+            impact_time = (int(record["fall_impact_frame"]) - int(frames[0])) / self.cfg.sample_rate_hz
 
         return WindowData(
             split=split, index=index, raw=raw, interpolated=interpolated, events=events,

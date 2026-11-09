@@ -56,6 +56,7 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         offset_hidden: int = 8,
         offset_scale: float = 1.0,
         offset_drop: float = 0.0,
+        use_offset: bool = True,
         spiking_heads: bool = False,
         head_rate_scale: float = 8.0,
         tau: float = 0.75,
@@ -80,6 +81,7 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         self.offset_dim = int(self.n_channels if offset_dim is None else offset_dim)
         self.offset_hidden = int(offset_hidden)
         self.offset_scale = float(offset_scale)
+        self.use_offset = bool(use_offset)
         if self.offset_hidden <= 0:
             raise ValueError("offset_hidden must be > 0")
 
@@ -101,7 +103,10 @@ class DualHeadSCN(nn.Module, EventInputMixin):
             soft_reset=bool(soft_reset),
         )
         self._build_backbone(float(p_drop), bool(bias), lif_kwargs)
-        self._build_offset_branch(float(offset_drop), lif_kwargs)
+        if self.use_offset:
+            self._build_offset_branch(float(offset_drop), lif_kwargs)
+        else:
+            self.fused_dim = self.out_dim
         self._build_heads(lif_kwargs)
 
     def _set_convolution_config(
@@ -281,6 +286,9 @@ class DualHeadSCN(nn.Module, EventInputMixin):
     ) -> tuple[Optional[torch.Tensor], torch.Tensor]:
         h_evt = self._forward_event_spikes(x)
         rep_evt = h_evt.mean(dim=2)
+
+        if not self.use_offset:
+            return (h_evt if self.spiking_heads else None), rep_evt
 
         offset_current = self._offset_as_constant_current(
             offset=offset,
