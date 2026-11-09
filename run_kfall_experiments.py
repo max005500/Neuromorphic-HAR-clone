@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score, f1_score
 
-from loaders.kfall_event_loader import KFallEventLoaderConfig
+from loaders.kfall_event_loader import DEFAULT_EXCLUDED_TASKS, TASK_CODES, KFallEventLoaderConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 WINDOW_SECONDS = (1.20, 2.06, 3.20)
@@ -118,6 +118,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label-dir", default=None)
     parser.add_argument("--annotation-file", default=None, help="Override train_kfall.py's default manual annotations.")
     parser.add_argument("--no-manual-labels", action="store_true")
+    parser.add_argument("--exclude-tasks", nargs="*", type=str.upper, choices=TASK_CODES,
+                        default=list(DEFAULT_EXCLUDED_TASKS),
+                        help="Tasks excluded in all splits; pass no values to retain all tasks.")
     parser.add_argument("--post-impact-seconds", type=float, default=1.2)
     parser.add_argument("--cache-dir", default="data/kfall_cache")
     parser.add_argument("--cache-format", choices=("npy", "pt"), default="npy")
@@ -184,6 +187,7 @@ def main(argv: list[str] | None = None) -> None:
                 "--patience", str(args.patience),
                 "--post-impact-seconds", str(args.post_impact_seconds),
                 "--quiet-loader",
+                "--exclude-tasks", *args.exclude_tasks,
             ]
             if label_dir is not None:
                 command.extend(("--label-dir", str(label_dir)))

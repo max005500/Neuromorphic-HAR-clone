@@ -3,16 +3,34 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from loaders.kfall_event_loader import KFallEventLoaderConfig
 from preprocess.utils import subject_split_indices
-from run_kfall_experiments import build_parser, window_conditions
+from run_kfall_experiments import build_parser, main, window_conditions
 from train_kfall import get_args
 
 
 class KFallExperimentTests(unittest.TestCase):
+    def test_task_exclusions_are_forwarded_and_can_be_disabled(self):
+        for args, expected in (
+            ([], ["T05", "T13", "T14", "T16", "T18", "T19"]),
+            (["--exclude-tasks", "t05", "T13"], ["T05", "T13"]),
+            (["--exclude-tasks"], []),
+        ):
+            with self.subTest(args=args):
+                self.assertEqual(get_args(args).exclude_tasks, expected)
+                with patch("run_kfall_experiments.subprocess.run", side_effect=RuntimeError("stop")) as run:
+                    with self.assertRaisesRegex(RuntimeError, "stop"):
+                        main(args)
+                command = run.call_args.args[0]
+                start = command.index("--exclude-tasks") + 1
+                self.assertEqual(command[start:start + len(expected)], expected)
+                remaining = command[start + len(expected):]
+                self.assertTrue(not remaining or remaining[0].startswith("--"))
+
     def test_kfall_protocol_keeps_complete_subjects_in_60_30_10_groups(self):
         split = KFallEventLoaderConfig().split
         self.assertEqual(split, (0.6, 0.3, 0.1))

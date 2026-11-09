@@ -32,6 +32,8 @@ ARRAY_KEYS = (
 )
 DEFAULT_THETA_KFALL = (0.1, 0.1, 0.1, 10.0, 10.0, 10.0)
 CLASS_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static", 3: "PostImpact"}
+DEFAULT_EXCLUDED_TASKS = ("T05", "T13", "T14", "T16", "T18", "T19")
+TASK_CODES = tuple(f"T{task:02d}" for task in range(1, 37))
 
 
 @dataclass(frozen=True)
@@ -52,8 +54,11 @@ class KFallEventLoaderConfig:
     batch_size: int = 256
     num_workers: int = 4
     pin_memory: bool = True
+    excluded_tasks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if any(task not in TASK_CODES for task in self.excluded_tasks):
+            raise ValueError("excluded_tasks must contain KFall task codes T01..T36.")
         if self.raw_win < 2 or self.out_win < 2 or self.stride < 1:
             raise ValueError("raw_win/out_win must be >= 2 and stride must be >= 1.")
         if self.n_ch != 6:
@@ -285,10 +290,20 @@ def load_or_build_kfall_event_splits(
             raise ValueError("Manual annotation file contains recordings absent from this dataset.")
         if not matched:
             raise ValueError("Manual annotation file does not match any dataset recordings.")
-        if missing:
-            print(f"[labels:warning] No manual labels for {len(missing)} recordings; using task/official fall labels: {missing}")
     else:
         missing = []
+    excluded = [record for record in records if record["code"] in cfg.excluded_tasks]
+    keep = [i for i, record in enumerate(records) if record["code"] not in cfg.excluded_tasks]
+    if not keep:
+        raise ValueError("Task exclusions leave no KFall recordings.")
+    recordings, labels = recordings[keep], labels[keep]
+    records = [records[i] for i in keep]
+    retained_keys = {f"{record['subject']}{record['code']}{record['trial']}" for record in records}
+    missing = [key for key in missing if key in retained_keys]
+    if cfg.excluded_tasks:
+        print(f"[tasks] excluded={list(cfg.excluded_tasks)} | removed={len(excluded)} recordings | retained={len(records)}")
+    if missing:
+        print(f"[labels:warning] No manual labels for {len(missing)} recordings; using task/official fall labels: {missing}")
     for record in records:
         frames = record["frames"]
         if int(frames[0]) != 1 or np.any(np.diff(frames) != 1):
@@ -303,7 +318,12 @@ def load_or_build_kfall_event_splits(
         "split_file_indices": {name: idx.tolist() for name, idx in zip(SPLIT_NAMES, indices)},
         "recordings": [{key: value for key, value in record.items() if key not in {"frames", "timestamps"}}
                        for record in records],
-        "raw_data": {"recordings": len(records), "skipped": skipped},
+        "raw_data": {
+            "recordings": len(records), "skipped": skipped,
+            "excluded_tasks": list(cfg.excluded_tasks),
+            "excluded_recordings": len(excluded),
+            "excluded_samples": sum(record["T"] for record in excluded),
+        },
         "channels": ["AccX", "AccY", "AccZ", "GyrX", "GyrY", "GyrZ"],
         "units": ["g", "g", "g", "degrees/s", "degrees/s", "degrees/s"],
         "head2_labels_available": False,

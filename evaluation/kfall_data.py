@@ -52,7 +52,8 @@ def _data_config(metadata: dict[str, Any]) -> dict[str, Any]:
     config = metadata.get("config")
     if not isinstance(config, dict):
         raise ValueError("KFall evaluation metadata has no preprocessing config.")
-    return {"post_impact_seconds": 0.0, **{key: value for key, value in config.items() if key not in RUNTIME_CONFIG}}
+    return {"post_impact_seconds": 0.0, "excluded_tasks": [],
+            **{key: value for key, value in config.items() if key not in RUNTIME_CONFIG}}
 
 
 def _record_identity(record: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +143,8 @@ def load_evaluation_data(
         raise ValueError("The checkpoint belongs to a different dataset.")
     if checkpoint_config.get("post_impact_seconds", 0.0) != config["post_impact_seconds"]:
         raise ValueError("Checkpoint post_impact_seconds differs from the training dataset config.")
+    if _normalized(checkpoint_config.get("exclude_tasks", [])) != _normalized(config["excluded_tasks"]):
+        raise ValueError("Checkpoint exclude_tasks differs from the training dataset config.")
     if run_metadata.get("manual_annotation_signature") != cache_metadata.get("manual_annotation_signature"):
         raise ValueError("Event cache manual annotations differ from the training snapshot.")
     for key in ("version", "source_signature", "channels", "units", "fall_label_rule", "head2_labels_available", "raw_data", "split_summary", "split_file_indices"):

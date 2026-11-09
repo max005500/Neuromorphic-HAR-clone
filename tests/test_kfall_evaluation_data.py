@@ -83,6 +83,9 @@ class KFallEvaluationDataTests(unittest.TestCase):
         changed = {**self.checkpoint_config, "theta": [1] * 6}
         with self.assertRaisesRegex(ValueError, "Checkpoint theta"):
             load_evaluation_data(self.run, changed)
+        changed = {**self.checkpoint_config, "exclude_tasks": ["T05"]}
+        with self.assertRaisesRegex(ValueError, "Checkpoint exclude_tasks"):
+            load_evaluation_data(self.run, changed)
         self.rewrite_cache_metadata(lambda value: value["config"].update(stride=2))
         with self.assertRaisesRegex(ValueError, "preprocessing config"):
             load_evaluation_data(self.run, self.checkpoint_config)

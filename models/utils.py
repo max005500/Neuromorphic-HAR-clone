@@ -29,16 +29,15 @@ class TriangularSurrogate(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_tensor: torch.Tensor, gamma: float) -> torch.Tensor:
-        gamma_value = float(gamma)
+        ctx.gamma = float(gamma)
         out = (input_tensor > 0).to(input_tensor.dtype)
-        gamma_tensor = input_tensor.new_tensor(gamma_value)
-        ctx.save_for_backward(input_tensor, gamma_tensor)
+        ctx.save_for_backward(input_tensor)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        input_tensor, gamma_tensor = ctx.saved_tensors
-        gamma = float(gamma_tensor.item())
+        (input_tensor,) = ctx.saved_tensors
+        gamma = ctx.gamma
         grad = (1.0 / (gamma * gamma)) * (gamma - input_tensor.abs()).clamp(min=0.0)
         return grad_output * grad, None
 

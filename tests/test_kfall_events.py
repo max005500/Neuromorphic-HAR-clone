@@ -6,6 +6,7 @@ import contextlib
 import csv
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
@@ -16,7 +17,7 @@ import numpy as np
 from openpyxl import Workbook
 
 from loaders.kfall_event_loader import (
-    KFallEventLoaderConfig, _source_signature, build_event_split, load_or_build_kfall_event_splits,
+    DEFAULT_EXCLUDED_TASKS, KFallEventLoaderConfig, _source_signature, build_event_split, load_or_build_kfall_event_splits,
     signal_to_events, window_starts_for_record,
     window_activity_labels,
 )
@@ -137,9 +138,59 @@ class KFallEventTests(unittest.TestCase):
             self.assertEqual(changed["files"], 2)
             self.assertNotEqual(signature["sha256"], changed["sha256"])
 
+    def test_task_exclusions_filter_all_subjects_and_trials_and_invalidate_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_fixture(root)
+            for subject in (6, 7, 8):
+                sensor = root / "sensor_data" / f"SA{subject:02d}"
+                for code in DEFAULT_EXCLUDED_TASKS:
+                    for trial in (1, 2):
+                        shutil.copyfile(sensor / f"S{subject:02d}T01R01.csv",
+                                        sensor / f"S{subject:02d}{code}R{trial:02d}.csv")
+            files = sorted((root / "sensor_data").rglob("*.csv"))
+            annotation = root / "manual.json"
+            annotation.write_text(json.dumps({
+                "format": "kfall_manual_normal_labels", "version": 1,
+                "dataset": "kfall", "sample_rate_hz": 100,
+                "recordings": {
+                    "SA" + path.stem[1:]: {
+                        "file": path.name, "reviewed": True, "intervals": [[101, 121, 2]],
+                    } for path in files
+                },
+            }))
+            kwargs = dict(dataset_root=root, cache_dir=root / "cache",
+                          annotation_file=annotation, verbose=False)
+            original, before = load_or_build_kfall_event_splits(cfg=self.cfg, **kwargs)
+            fall_counts = {name: int(np.sum(arrays["y_h1"] == 0)) for name, arrays in original.items()}
+            cfg = replace(self.cfg, excluded_tasks=DEFAULT_EXCLUDED_TASKS)
+            with contextlib.redirect_stdout(io.StringIO()):
+                filtered, after = load_or_build_kfall_event_splits(cfg=cfg, **kwargs)
+            self.assertEqual(after["split_subjects"], before["split_subjects"])
+            self.assertEqual(after["raw_data"]["excluded_recordings"], 36)
+            self.assertEqual(after["raw_data"]["excluded_samples"], 36 * 20)
+            self.assertEqual(len(after["recordings"]), 9)
+            self.assertEqual(after["manual_annotation_missing_recordings"], [])
+            for name, arrays in filtered.items():
+                self.assertEqual(int(np.sum(arrays["y_h1"] == 0)), fall_counts[name])
+                self.assertLess(len(arrays["y_h1"]), len(original[name]["y_h1"]))
+                for index in arrays["file_idx"]:
+                    self.assertNotIn(after["recordings"][int(index)]["code"], DEFAULT_EXCLUDED_TASKS)
+            with patch("loaders.kfall_event_loader.load_kfall_3class", side_effect=AssertionError("cache missed")):
+                load_or_build_kfall_event_splits(cfg=cfg, **kwargs)
+            _, restored = load_or_build_kfall_event_splits(cfg=self.cfg, **kwargs)
+            self.assertEqual(len(restored["recordings"]), 45)
+            self.assertTrue(all(path.is_file() for path in files))
+            with self.assertRaisesRegex(ValueError, "no KFall recordings"):
+                load_or_build_kfall_event_splits(
+                    cfg=replace(self.cfg, excluded_tasks=("T01", "T04", "T20", *DEFAULT_EXCLUDED_TASKS)),
+                    **kwargs,
+                )
+
     def test_invalid_encoder_settings_fail_early(self):
         for changes in ({"theta_sd": (np.nan,) * 6}, {"stride": 0}, {"n_ch": 9},
-                        {"dead_zone": np.inf}, {"raw_win": 1}, {"fall_policy": "all"}):
+                        {"dead_zone": np.inf}, {"raw_win": 1}, {"fall_policy": "all"},
+                        {"excluded_tasks": ("T00",)}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(self.cfg, **changes)
 

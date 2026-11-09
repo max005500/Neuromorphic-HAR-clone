@@ -28,7 +28,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from loaders.kfall_event_loader import CLASS_NAMES, KFallEventLoaderConfig, load_or_build_kfall_event_splits
+from loaders.kfall_event_loader import (
+    CLASS_NAMES, DEFAULT_EXCLUDED_TASKS, TASK_CODES,
+    KFallEventLoaderConfig, load_or_build_kfall_event_splits,
+)
 from loaders.utils import balanced_class_weights
 from loaders.kfall_tensor_cache import load_or_build_tensor_dataset
 from models.models import DualHeadSCN, SingleHeadSCN
@@ -78,6 +81,9 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--annotation-file", default=None if annotation_default is None else str(annotation_default),
                    help="Manual normal-activity labels; defaults to annotations JSON (or its .bak).")
     p.add_argument("--no-manual-labels", action="store_true", help="Use the original task grouping instead of manual normal intervals.")
+    p.add_argument("--exclude-tasks", nargs="*", type=str.upper, choices=TASK_CODES,
+                   default=list(DEFAULT_EXCLUDED_TASKS),
+                   help="Exclude every repetition/subject of these tasks; pass no values to retain all tasks.")
     p.add_argument("--cache-dir", default="data/kfall_cache")
     p.add_argument("--cache-name", default="default")
     p.add_argument("--refresh-cache", action="store_true")
@@ -160,6 +166,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         sd_init=cfg.sd_init,
         fall_policy=cfg.fall_policy,
         post_impact_seconds=cfg.post_impact_seconds,
+        excluded_tasks=tuple(cfg.exclude_tasks),
     )
     splits, metadata = load_or_build_kfall_event_splits(
         dataset_root=cfg.dataset_root,

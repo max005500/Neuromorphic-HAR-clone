@@ -231,6 +231,27 @@ python train_kfall.py --preprocess-only --workers 0
 
 The default KFall subject proportions are approximately 60% training, 30% validation, and 10% test: 19/10/3 participants for all 32 KFall subjects (19/9/3 if only 31 subjects are available). Subject counts are rounded to whole participants, so window counts need not follow those proportions. Every recording and overlapping window from a participant stays in that participant's split. The split and source-recording metadata are saved in the cache and copied into each training run's `dataset_metadata.json`; the seed makes the partition reproducible. Changed split/encoding settings invalidate the event cache. Pass `--split 0.6 0.3 0.1` explicitly to `optimize_theta.py` to match this KFall protocol.
 
+`train_kfall.py` and `run_kfall_experiments.py` now exclude **T05, T13, T14,
+T16, T18, and T19** by default because of annotation quality concerns. All
+repetitions and subjects are excluded from train, validation, and test; source
+CSVs and annotations are not modified. The filter and removed recording/sample
+counts are saved in cache metadata and copied into each run. Changing the
+filter invalidates the cache, including derived PT files. Use a separate cache
+and output folder to preserve earlier experiments:
+
+```bash
+python run_kfall_experiments.py --cache-format pt \
+  --exclude-tasks T05 T13 T14 T16 T18 T19 \
+  --split 0.6 0.3 0.1 --post-impact-seconds 1.2 \
+  --epochs 100 --batch-size 256 --workers 4 --gpu 0 --seed 0 \
+  --cache-dir data/kfall_cache_filtered \
+  --output-dir results/kfall_filtered
+```
+
+Pass `--exclude-tasks` with no values to keep all tasks, or provide another
+list to replace the default exclusions. The low-level event loader retains
+all tasks unless `excluded_tasks` is supplied explicitly.
+
 SisFall also splits whole subjects by default. UCI HAR defaults to its official test subjects and holds out whole training subjects for validation (`--val-ratio`); `--case subject_split --split 0.8 0.1 0.1` repartitions all UCI subjects. Existing event caches from the previous recording/window split are rebuilt. Each cache records `split_strategy: "subject"` and the disjoint `split_subjects` lists.
 
 SisFall dual-head:
@@ -277,6 +298,18 @@ python plot_training.py runs/kfall_scn_YYYYMMDD_HHMMSS
 ```
 
 KFall runs save the best validation checkpoint, history, test predictions, a classification report, confusion matrices, and dataset metadata. Cached events are read on demand during training to avoid converting the complete cache to floating-point tensors in RAM.
+
+### GPU utilization
+
+The LIF layers update their membrane state sequentially in Python, launching
+many small GPU operations. Low GPU utilization can therefore persist even
+with cached data; GPU utilization is not a percentage of peak compute capacity.
+The surrogate gradient keeps its constant `gamma` on the CPU instead of
+reading a GPU scalar at every backward time step, avoiding those forced
+CPU/GPU synchronizations without changing the triangular gradient rule.
+Compare seconds per epoch, not utilization alone. Larger batches may improve
+throughput but also change the optimization; keep the same batch size across
+paired window/offset experiments.
 
 ### Optional PyTorch tensor cache
 
