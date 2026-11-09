@@ -140,31 +140,53 @@ def evaluate_run(
     elif cfg.class_weight != "none":
         raise ValueError(f"Unknown checkpoint class weighting: {cfg.class_weight}.")
 
-    dataset = KFallTrainingDataset(split)
-    loader = DataLoader(Subset(dataset, indices.tolist()), batch_size=size, shuffle=False,
-                        num_workers=int(workers), pin_memory=dev.type == "cuda")
-    probabilities, targets = [], []
-    loss_sum = 0.0
     inference_started = time.perf_counter()
-    with torch.inference_mode():
-        for batch in loader:
-            events = batch["x"].to(dev, non_blocking=True)
-            offsets = batch["offset"].to(dev, non_blocking=True)
-            target = batch["y"].to(dev, non_blocking=True)
-            with make_autocast(bool(cfg.amp and dev.type == "cuda")):
-                # extract_single_logits also selects Head 1 of the optional
-                # dual architecture; KFall supplies no posture-head targets.
-                logits = extract_single_logits(model(events, offset=offsets))
-                if logits.shape != (len(target), cfg.n_classes) or not torch.isfinite(logits).all():
-                    raise ValueError("The checkpoint produced logits incompatible with its class count.")
-                loss = F.cross_entropy(logits, target, weight=class_weight,
-                                       label_smoothing=float(cfg.label_smoothing))
-            loss_sum += float(loss.item()) * len(target)
-            probabilities.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
-            targets.append(target.cpu().numpy())
+    temporal = getattr(cfg, "architecture", "scn") == "compact_recurrent"
+    recurrent_metrics = {}
+    if temporal:
+        from train.kfall_recurrent import make_sequence_loader, run_epoch
+
+        if window is not None:
+            raise ValueError("A recurrent window requires its preceding state; evaluate the full test or a complete subject.")
+        selected_split = {key: split[key][indices] for key in ("file_idx", "start", "end_frame", "subject")}
+        cfg.workers, cfg.no_pin_memory = int(workers), False
+        dataset = Subset(KFallTrainingDataset(split), indices.tolist())
+        loader = make_sequence_loader(dataset, selected_split, cfg, dev)
+        result = run_epoch(model, loader, dev, cfg, class_weight=class_weight, collect_predictions=True)
+        y_true, probability = result.pop("y_true"), result.pop("probabilities")
+        indices = indices[result.pop("window_indices")]
+        result.pop("y_pred")
+        loss_sum = result["loss"] * len(indices)
+        recurrent_metrics = {
+            "architecture": cfg.architecture, "sequence_length": cfg.sequence_length,
+            "recurrent_spike_rate": result["recurrent_spike_rate"],
+            "sequence_resets": result["sequence_resets"],
+            "state_protocol": "reset per recording/gap; persist across chronological chunks",
+        }
+    else:
+        dataset = KFallTrainingDataset(split)
+        loader = DataLoader(Subset(dataset, indices.tolist()), batch_size=size, shuffle=False,
+                            num_workers=int(workers), pin_memory=dev.type == "cuda")
+        probabilities, targets = [], []
+        loss_sum = 0.0
+        with torch.inference_mode():
+            for batch in loader:
+                events = batch["x"].to(dev, non_blocking=True)
+                offsets = batch["offset"].to(dev, non_blocking=True)
+                target = batch["y"].to(dev, non_blocking=True)
+                with make_autocast(bool(cfg.amp and dev.type == "cuda")):
+                    # Selects the supervised activity head for dual models.
+                    logits = extract_single_logits(model(events, offset=offsets))
+                    if logits.shape != (len(target), cfg.n_classes) or not torch.isfinite(logits).all():
+                        raise ValueError("The checkpoint produced logits incompatible with its class count.")
+                    loss = F.cross_entropy(logits, target, weight=class_weight,
+                                           label_smoothing=float(cfg.label_smoothing))
+                loss_sum += float(loss.item()) * len(target)
+                probabilities.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
+                targets.append(target.cpu().numpy())
+        y_true = np.concatenate(targets)
+        probability = np.concatenate(probabilities)
     inference_time = time.perf_counter() - inference_started
-    y_true = np.concatenate(targets)
-    probability = np.concatenate(probabilities)
     test_subjects = sorted(np.unique(np.asarray(split["subject"])[indices]).tolist())
     summary = {
         "dataset": "kfall", "split": "test", "run_dir": str(run_dir),
@@ -173,7 +195,8 @@ def evaluate_run(
         "checkpoint_selection": "lowest_validation_loss" if checkpoint is None else "explicit_checkpoint",
         "cache_dir": str(resolved_cache), "device": str(dev), "batch_size": size,
         "workers": int(workers), "n": len(indices), "loss": loss_sum / len(indices),
-        "loss_aggregation": "sample-count-weighted mean of batch cross-entropy means",
+        "loss_aggregation": ("sample-count-weighted mean of temporal chunk cross-entropy means" if temporal
+                             else "sample-count-weighted mean of batch cross-entropy means"),
         "training_class_weights": None if class_weight is None else class_weight.detach().cpu().tolist(),
         "label_smoothing": float(cfg.label_smoothing), "head_mode": cfg.head_mode,
         "head2_supervised": False, "fall_policy": cfg.fall_policy,
@@ -186,6 +209,7 @@ def evaluate_run(
         "inference_time_sec": inference_time,
         "evaluation_time_sec": time.perf_counter() - started,
         "output_dir": str(destination),
+        **recurrent_metrics,
     }
     if len(indices) == 1:
         prediction = int(probability[0].argmax())

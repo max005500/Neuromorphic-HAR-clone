@@ -299,6 +299,89 @@ python plot_training.py runs/kfall_scn_YYYYMMDD_HHMMSS
 
 KFall runs save the best validation checkpoint, history, test predictions, a classification report, confusion matrices, and dataset metadata. Cached events are read on demand during training to avoid converting the complete cache to floating-point tensors in RAM.
 
+### Compact recurrent KFall SCN
+
+The original model remains the default. `train_kfall.py --architecture compact`
+selects 16/32/32 convolution channels and 16/16/8 kernels (19,852 parameters
+with the default four-class readout and offset branch).
+`--architecture compact_recurrent` inserts a 32-neuron recurrent LIF layer
+after the fused 32 event-rate + 8 offset-rate features, followed by a
+four-class linear readout (**22,156 parameters**, versus 111,276 for the
+original four-class SCN). Overrides to channels/hidden size change the count.
+Class IDs remain Fall=0, Dynamic=1, Static=2, PostImpact=3.
+
+```bash
+python train_kfall.py --architecture compact_recurrent \
+  --raw-win 120 --out-win 1200 --stride 10 \
+  --post-impact-seconds 1.2 --sequence-length 32 \
+  --recurrent-hidden 32 --recurrent-beta 0.9 \
+  --split 0.6 0.3 0.1 --epochs 100 --workers 4 --gpu 0 --seed 0 \
+  --cache-format pt --cache-dir data/kfall_cache_recurrent \
+  --cache-name w120_s10 --out-dir results/kfall_compact_recurrent \
+  --run kfall_compact_recurrent
+```
+
+Default manual labels, task exclusions and subject isolation are unchanged.
+At KFall's 100 Hz, stride 10 means **100 ms** between nominal decisions;
+use stride 5 for 50 ms. Endpoint anchors can have shorter final steps.
+Data are ordered by recording and window start. Only independent
+recording/gap groups are shuffled for training; decisions inside a group
+are never shuffled. State resets at each recording, epoch/split boundary,
+or a gap exceeding the configured stride (including FrameCounter gaps).
+No sequences cross subjects. The existing label masks determine which
+windows are available; missing/unlabelled spans are not invented.
+
+Training uses one recording stream at a time with truncated BPTT:
+`--sequence-length` controls decisions per optimizer step (default 32).
+Membrane and previous spikes persist, but their gradients detach at chunk
+boundaries. `--batch-size` does not control recurrent chunks. DataLoader
+workers still fetch windows; they do not carry neural state. The window
+encoder runs the chunk's windows together; BatchNorm uses chunk statistics
+during training and frozen running statistics during causal inference.
+
+The recurrent equation is `u[t] = beta*u[t-1] + W*z[t] + R*s[t-1]
+- threshold*s[t-1]`, with triangular surrogate gradients and binary spikes
+feeding the lightweight readout. Its explicit `LIFState` is returned by
+`CompactRecurrentSCN.forward(events, offsets, state)`; input shapes are
+`(B, decisions, event_steps, 6, 2)` and `(B, decisions, 6)`.
+Passing `state=None` starts a new recording. Applications must never
+reuse another subject/recording's state.
+
+Training saves the usual checkpoints/history plus `metrics/test_best/`
+reports, parameter count/FP32 parameter bytes, recurrent spike fraction,
+and state reset counts. The two FP32 recurrent state vectors need 256
+bytes per stream at hidden size 32; this excludes input/convolution
+buffers and runtime/optimizer memory. Spike fraction describes only the
+recurrent layer and is not an energy measurement.
+
+```bash
+python evaluate_kfall.py --run-dir PATH_TO_RECURRENT_RUN --device cuda:0
+# Complete held-out subject, preserving its within-recording history:
+python evaluate_kfall.py --run-dir PATH_TO_RECURRENT_RUN --subject SA07
+```
+
+The evaluator reconstructs the recurrent model and replays windows in order,
+with the same resets and saved chunk size. Single-window evaluation is
+rejected because it would omit preceding state. The external frozen-model
+UCI evaluator is window-independent and therefore rejects recurrent runs.
+The `compact` variant can also be trained with `--no-offset`; the recurrent
+variant supports that ablation too.
+
+For inference-only BatchNorm folding:
+
+```python
+folded_model = trained_model.eval().fuse_batch_norm()
+```
+
+This returns an independent recurrent model with Conv/Linear BatchNorm
+folded into weights/biases; keep the unfused checkpoint for retraining.
+**Not implemented here:** persistent Sigma-Delta state, incremental
+convolution buffers, fixed-point/INT8 quantization, or Loihi/FPGA export.
+Only the recurrent memory persists between decisions; the encoder/backbone
+still recomputes overlapping windows. No hardware latency/energy or accuracy
+improvement is claimed. Compare the original, compact and recurrent models
+with identical splits, windows, thresholds and seeds before selecting one.
+
 ### GPU utilization
 
 The LIF layers update their membrane state sequentially in Python, launching
