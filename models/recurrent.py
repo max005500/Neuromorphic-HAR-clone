@@ -38,10 +38,13 @@ class RecurrentLIF(nn.Module):
         self.recurrent = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.orthogonal_(self.recurrent.weight, gain=0.5)
 
-    def forward(self, features: torch.Tensor, state: LIFState | None = None):
+    def forward(self, features: torch.Tensor, state: LIFState | None = None,
+                mask: torch.Tensor | None = None):
         if features.ndim != 3 or features.shape[1] < 1:
             raise ValueError("Recurrent features must have shape (B, decisions, features).")
         batch = features.shape[0]
+        if mask is not None and (mask.shape != features.shape[:2] or mask.dtype != torch.bool):
+            raise ValueError("Recurrent mask must be boolean with shape (B, decisions).")
         if state is None:
             zeros = features.new_zeros(batch, self.hidden_size)
             state = LIFState(zeros, torch.zeros_like(zeros))
@@ -49,12 +52,18 @@ class RecurrentLIF(nn.Module):
             if value.shape != (batch, self.hidden_size) or value.device != features.device:
                 raise ValueError("Recurrent state must match batch, hidden size and device.")
         outputs = []
-        for current in features.unbind(dim=1):
+        for t, current in enumerate(features.unbind(dim=1)):
             membrane = (self.beta * state.membrane + self.input(current)
                         + self.recurrent(state.spikes) - self.threshold * state.spikes)
             spikes = TriangularSurrogate.apply(membrane - self.threshold, 1.0)
-            state = LIFState(membrane, spikes)
-            outputs.append(spikes)
+            if mask is None:
+                state = LIFState(membrane, spikes)
+                outputs.append(spikes)
+            else:
+                valid = mask[:, t:t + 1]
+                state = LIFState(torch.where(valid, membrane, state.membrane),
+                                 torch.where(valid, spikes, state.spikes))
+                outputs.append(torch.where(valid, spikes, torch.zeros_like(spikes)))
         return torch.stack(outputs, dim=1), state
 
 
@@ -80,15 +89,26 @@ class CompactRecurrentSCN(nn.Module):
         self.head = nn.Linear(hidden_size, n_classes)
 
     def forward(self, events: torch.Tensor, offset: torch.Tensor | None = None,
-                state: LIFState | None = None):
+                state: LIFState | None = None, mask: torch.Tensor | None = None):
         if events.ndim != 5 or events.shape[-2:] != (6, 2) or events.shape[1] < 1:
             raise ValueError("Recurrent SCN expects (B, decisions, event_steps, 6, 2).")
         batch, steps = events.shape[:2]
         if offset is not None and offset.shape != (batch, steps, 6):
             raise ValueError("Recurrent offsets must have shape (B, decisions, 6).")
         flattened_offset = None if offset is None else offset.flatten(0, 1)
-        _, features = self.encoder(events.flatten(0, 1), offset=flattened_offset)
-        spikes, state = self.temporal(features.reshape(batch, steps, -1), state)
+        if mask is None:
+            _, features = self.encoder(events.flatten(0, 1), offset=flattened_offset)
+            features = features.reshape(batch, steps, -1)
+        else:
+            if mask.shape != (batch, steps) or mask.dtype != torch.bool or not mask.any():
+                raise ValueError("SCN mask must be boolean (B, decisions) with valid windows.")
+            valid = mask.flatten()
+            selected_offsets = None if flattened_offset is None else flattened_offset[valid]
+            _, encoded = self.encoder(events.flatten(0, 1)[valid], offset=selected_offsets)
+            features = encoded.new_zeros(batch * steps, encoded.shape[-1])
+            features[valid] = encoded
+            features = features.reshape(batch, steps, -1)
+        spikes, state = self.temporal(features, state, mask)
         return self.head(spikes), state, spikes
 
     def fuse_batch_norm(self):

@@ -331,13 +331,45 @@ or a gap exceeding the configured stride (including FrameCounter gaps).
 No sequences cross subjects. The existing label masks determine which
 windows are available; missing/unlabelled spans are not invented.
 
-Training uses one recording stream at a time with truncated BPTT:
+Training uses independent recording streams with truncated BPTT:
 `--sequence-length` controls decisions per optimizer step (default 32).
 Membrane and previous spikes persist, but their gradients detach at chunk
-boundaries. `--batch-size` does not control recurrent chunks. DataLoader
+boundaries. `--recurrent-batch-size` controls parallel recording streams
+(default 1, preserving the original training behavior). `--batch-size` does
+not control recurrent chunks. DataLoader
 workers still fetch windows; they do not carry neural state. The window
 encoder runs the chunk's windows together; BatchNorm uses chunk statistics
 during training and frozen running statistics during causal inference.
+
+For the RTX 5090, start with **32 streams x 32 decisions = up to 1024 real
+windows per optimizer step**:
+
+```bash
+python train_kfall.py --architecture compact_recurrent \
+  --raw-win 120 --out-win 1200 --stride 10 \
+  --sequence-length 32 --recurrent-batch-size 32 \
+  --post-impact-seconds 1.2 --split 0.6 0.3 0.1 \
+  --epochs 100 --workers 4 --gpu 0 --seed 0 \
+  --cache-format pt --cache-dir data/kfall_cache_recurrent \
+  --cache-name w120_s10 --out-dir results/kfall_recurrent_b32
+```
+
+Increase streams to 64 if measured memory and throughput allow, or decrease
+to 16/8 on out-of-memory errors. Capacity is not guaranteed by the GPU model:
+activations, event length and BPTT determine the peak. Longer sequences change
+the temporal learning horizon; increasing parallel streams is the preferred
+way to enlarge batches. Larger batches change optimization, so keep the same
+settings across paired experiments and select hyperparameters on validation.
+Parallel slots retain independent states and reset when a new recording
+enters the slot. Variable tails are masked: padding is excluded from the
+encoder/BatchNorm, loss, predictions and spike metrics, and inactive states
+do not evolve. Fewer real windows may be available near recording ends.
+For non-recurrent SCN/UCI training, use ordinary `--batch-size 1024` instead.
+
+`tqdm` shows encoding progress and train/eval batch progress (temporal runs
+also show window counts, loss and accuracy). Use `--no-progress` on the
+training scripts to disable train/eval bars; `--quiet-loader` suppresses
+encoding bars. Experiment runners display encoding progress by default.
 
 The recurrent equation is `u[t] = beta*u[t-1] + W*z[t] + R*s[t-1]
 - threshold*s[t-1]`, with triangular surrogate gradients and binary spikes

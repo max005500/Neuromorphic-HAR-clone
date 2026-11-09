@@ -13,12 +13,61 @@ import torch
 
 from evaluate_kfall import evaluate_run
 from models.recurrent import CompactRecurrentSCN, RecurrentLIF
-from train.kfall_recurrent import RecordingChunkSampler, recording_sequences
-from train_kfall import build_model, get_args, main
+from train.kfall_recurrent import RecordingChunkSampler, make_sequence_loader, recording_sequences, run_epoch
+from train_kfall import KFallTrainingDataset, build_model, get_args, main
 from test_kfall_training import fixture_args, write_fixture
 
 
 class CompactRecurrentTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_cuda_parallel_streams_amp_and_worker_loading(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_fixture(root)
+            args = fixture_args(root) + [
+                "--architecture", "compact_recurrent", "--post-impact-seconds", "1.2",
+                "--raw-win", "120", "--stride", "30", "--sequence-length", "2",
+                "--recurrent-batch-size", "2", "--cache-format", "pt",
+                "--no-progress", "--amp", "--workers", "2",
+            ]
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(args)
+                run = next((root / "runs").iterdir())
+                evaluate_run(run, device="cuda:0", workers=2, output_dir=root / "replay")
+            np.testing.assert_allclose(
+                np.load(run / "metrics" / "test_best" / "probabilities.npy"),
+                np.load(root / "replay" / "probabilities.npy"), atol=1e-6,
+            )
+
+    def test_parallel_streams_match_serial_replay_without_padding_or_state_leakage(self):
+        torch.manual_seed(7)
+        n = 14
+        files = np.repeat([0, 1, 2, 3], [5, 3, 2, 4])
+        starts = np.concatenate([np.arange(length) * 10 for length in (5, 3, 2, 4)])
+        split = {
+            "x_ev": np.random.default_rng(7).integers(0, 2, (n, 256, 6, 2), dtype=np.uint8),
+            "offset": np.ones((n, 6), dtype=np.float32), "y_h1": np.arange(n) % 4,
+            "y_h2": np.zeros(n, dtype=np.float32), "src_h2": np.zeros(n, dtype=np.uint8),
+            "w_h2": np.zeros(n, dtype=np.float32), "file_idx": files,
+            "start": starts, "end_frame": starts + 120,
+            "subject": np.asarray([f"SA{file:02d}" for file in files]),
+        }
+        cfg = get_args(["--architecture", "compact_recurrent", "--sequence-length", "2",
+                        "--stride", "10", "--workers", "0", "--no-progress"])
+        dev = torch.device("cpu")
+        model = build_model(cfg, dev)
+        dataset = KFallTrainingDataset(split)
+        serial = run_epoch(model, make_sequence_loader(dataset, split, cfg, dev), dev, cfg,
+                           collect_predictions=True)
+        cfg.recurrent_batch_size = 3
+        parallel = run_epoch(model, make_sequence_loader(dataset, split, cfg, dev), dev, cfg,
+                             collect_predictions=True)
+        np.testing.assert_array_equal(parallel["window_indices"], np.arange(n))
+        np.testing.assert_allclose(parallel["probabilities"], serial["probabilities"], atol=1e-6)
+        self.assertEqual(parallel["n"], n)
+        self.assertEqual(parallel["sequence_resets"], 4)
+        self.assertAlmostEqual(parallel["recurrent_spike_rate"], serial["recurrent_spike_rate"])
+
     def test_equation_spikes_gradients_and_explicit_reset(self):
         cell = RecurrentLIF(1, 1, beta=0.5, threshold=0.5)
         with torch.no_grad():
@@ -94,6 +143,7 @@ class CompactRecurrentTests(unittest.TestCase):
                 "--architecture", "compact_recurrent", "--post-impact-seconds", "1.2",
                 "--raw-win", "120", "--stride", "30", "--sequence-length", "2",
                 "--cache-format", "pt",
+                "--recurrent-batch-size", "2", "--no-progress",
             ]
             with patch("train_kfall.get_device", return_value=torch.device("cpu")), contextlib.redirect_stdout(io.StringIO()):
                 main(args)

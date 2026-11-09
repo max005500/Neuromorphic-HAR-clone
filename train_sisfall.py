@@ -39,6 +39,7 @@ from train.utils import (
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from loaders.sisfall_event_loader import (
     EventLoaderConfig,
@@ -270,7 +271,8 @@ def run_epoch_dual(
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     with grad_ctx:
-        for batch in loader:
+        for batch in tqdm(loader, desc="Train" if is_train else "Eval", unit="batch",
+                          dynamic_ncols=True, disable=getattr(cfg, "no_progress", False)):
             x, offset, y_h1, y_h2, src_h2, w_h2 = unpack_dual_batch(batch, dev)
             if is_train:
                 optimizer.zero_grad(set_to_none=True)

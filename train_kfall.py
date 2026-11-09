@@ -104,6 +104,8 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--head-mode", choices=["single", "dual"], default="single", help="Activity single head, or dual architecture with the unannotated posture head disabled.")
     p.add_argument("--architecture", choices=("scn", "compact", "compact_recurrent"), default="scn")
     p.add_argument("--sequence-length", type=int, default=32, help="Decisions per truncated BPTT chunk; recurrent model only.")
+    p.add_argument("--recurrent-batch-size", type=int, default=1,
+                   help="Independent recording streams trained in parallel (default 1).")
     p.add_argument("--recurrent-hidden", type=int, default=32)
     p.add_argument("--recurrent-beta", type=float, default=0.9)
     p.add_argument("--out-dir", default="runs")
@@ -116,6 +118,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--amp", action="store_true")
     p.add_argument("--no-pin-memory", action="store_true")
     p.add_argument("--quiet-loader", action="store_true")
+    p.add_argument("--no-progress", action="store_true", help="Disable training progress bars.")
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=1e-4)
     p.add_argument("--grad-clip", type=float, default=1.0)
@@ -148,8 +151,8 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     compact = cfg.architecture != "scn"
     cfg.conv_ch = cfg.conv_ch if cfg.conv_ch is not None else ([16, 32, 32] if compact else [32, 64, 64])
     cfg.kernels = cfg.kernels if cfg.kernels is not None else ([16, 16, 8] if compact else [32, 32, 8])
-    if cfg.sequence_length < 1 or cfg.recurrent_hidden < 1:
-        p.error("sequence-length and recurrent-hidden must be positive.")
+    if cfg.sequence_length < 1 or cfg.recurrent_hidden < 1 or cfg.recurrent_batch_size < 1:
+        p.error("sequence-length, recurrent-hidden and recurrent-batch-size must be positive.")
     if not np.isfinite(cfg.recurrent_beta) or not 0 <= cfg.recurrent_beta < 1:
         p.error("recurrent-beta must be finite in [0, 1).")
     if cfg.architecture == "compact_recurrent" and (cfg.head_mode != "single" or cfg.spiking_heads):
@@ -283,7 +286,8 @@ def main(argv: list[str] | None = None) -> None:
         print("[head2] No temporal posture labels are available in KFall; posture loss and head parameters are disabled.")
     if cfg.architecture == "compact_recurrent":
         print(f"[temporal] architecture={cfg.architecture} | parameters={total} | chunk={cfg.sequence_length} decisions "
-              f"| nominal_step={cfg.stride / 100:.3f}s | batch-size ignored (one recording per chunk).")
+              f"| streams={cfg.recurrent_batch_size} | max_windows_per_step={cfg.sequence_length * cfg.recurrent_batch_size} "
+              f"| nominal_step={cfg.stride / 100:.3f}s | batch-size ignored (use recurrent-batch-size).")
 
     optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=cfg.lr, weight_decay=cfg.wd)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.plateau_patience, min_lr=cfg.min_lr)
@@ -355,6 +359,7 @@ def main(argv: list[str] | None = None) -> None:
     if cfg.architecture == "compact_recurrent":
         test_metrics.update(
             sequence_length=cfg.sequence_length,
+            recurrent_batch_size=cfg.recurrent_batch_size,
             recurrent_hidden=cfg.recurrent_hidden,
             recurrent_state_fp32_bytes_per_stream=2 * cfg.recurrent_hidden * 4,
             state_protocol="reset per recording/gap; persist and detach across chronological chunks",

@@ -37,6 +37,7 @@ from train.utils import (
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from loaders.ucihar_event_loader import (
     ACTIVITY_LABELS,
@@ -95,6 +96,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--amp", action="store_true", help="Use CUDA mixed precision.")
     p.add_argument("--no-pin-memory", action="store_true", help="Disable pin_memory in DataLoaders.")
     p.add_argument("--quiet-loader", action="store_true", help="Reduce loader/cache logging.")
+    p.add_argument("--no-progress", action="store_true", help="Disable training progress bars.")
 
     # Optimizer/scheduler
     p.add_argument("--lr", type=float, default=1e-3, help="Adam learning rate.")
@@ -230,7 +232,8 @@ def run_epoch(
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     with grad_ctx:
-        for batch in loader:
+        for batch in tqdm(loader, desc="Train" if is_train else "Eval", unit="batch",
+                          dynamic_ncols=True, disable=getattr(cfg, "no_progress", False)):
             x, offset, y = unpack_batch(batch, dev)
 
             if is_train:

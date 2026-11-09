@@ -159,6 +159,7 @@ def evaluate_run(
         loss_sum = result["loss"] * len(indices)
         recurrent_metrics = {
             "architecture": cfg.architecture, "sequence_length": cfg.sequence_length,
+            "recurrent_batch_size": getattr(cfg, "recurrent_batch_size", 1),
             "recurrent_spike_rate": result["recurrent_spike_rate"],
             "sequence_resets": result["sequence_resets"],
             "state_protocol": "reset per recording/gap; persist across chronological chunks",

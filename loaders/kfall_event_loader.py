@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from loaders import utils as u
 from labeling.kfall_manual_labels import load_manual_labels
@@ -182,6 +183,7 @@ def build_event_split(
         for key, (shape, dtype) in shapes.items()
     }
     cursor = 0
+    progress = tqdm(total=count, desc=f"Encode KFall {name}", unit="window", dynamic_ncols=True, disable=not verbose)
     for fi, starts in selected:
         signal = np.asarray(recordings[fi], dtype=np.float32)
         info = metadata[fi]
@@ -209,8 +211,8 @@ def build_event_split(
                 if activity == 0 else np.nan
             )
             cursor += 1
-            if verbose and cfg.verbose_every and cursor % cfg.verbose_every == 0:
-                print(f"[kfall:{name}] Encoded {cursor}/{count} windows.")
+            progress.update(1)
+    progress.close()
     for array in arrays.values():
         if isinstance(array, np.memmap):
             array.flush()
