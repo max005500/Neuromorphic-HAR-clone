@@ -429,6 +429,53 @@ These reports measure offline window classification; `lead_time_ms` describes
 the annotation at a window endpoint and is not an achieved continuous warning
 time.
 
+### UCI-HAR architecture experiments (new models, original six labels)
+
+To compare the architecture rather than transfer a frozen KFall model, train
+six fresh UCI-HAR models: 1.20, 2.06, and 2.56 seconds, each with and without
+the auxiliary offset branch:
+
+```bash
+python run_ucihar_experiments.py \
+  --split 0.6 0.3 0.1 --epochs 100 --batch-size 256 \
+  --workers 4 --gpu 0 --seed 0 \
+  --cache-dir data/ucihar_window_cache \
+  --output-dir results/ucihar_window_experiments
+```
+
+The original six activities are retained (internally IDs 0..5): walking,
+walking upstairs, walking downstairs, sitting, standing, and laying.
+No Dynamic/Static grouping is applied. All 30 participants are repartitioned
+by subject into 18 training, 9 validation, and 3 test participants, sharing
+one manifest and seed across all six runs. This deliberately differs from
+the UCI official split. Original overlapping segments never cross subject
+partitions.
+
+Each 128-sample, 50 Hz source segment is linearly resampled to 256 samples
+at 100 Hz, without joining segments. The final target at 2.55 s holds the
+last measured value at 2.54 s (one half-sample boundary extension).
+Windows of 120/206/256 samples use strides 60/103/128, within each segment
+only; incomplete tails are discarded. The encoder produces 1200/2060/2560
+event steps. Resampling adds no new measured information. Native UCI channel
+order/units and its existing threshold defaults are retained; thresholds can
+be supplied with `--theta` but must be selected on training/validation, never
+test. The same thresholds are used for both offset conditions.
+
+Each duration's event cache is reused for its two offset conditions. Each
+run saves its configuration, checkpoint selected by validation loss, history,
+six-class classification report, confusion matrices and test predictions.
+`summary.csv`, `summary.json` and `comparison.png` compare accuracy, macro-F1
+and macro-recall. Repeat seeds to assess variability; do not use test results
+to select a preferred configuration.
+
+Standalone example:
+
+```bash
+python train_ucihar.py --case subject_split --split 0.6 0.3 0.1 \
+  --sample-rate-hz 100 --raw-win 206 --window-stride 103 --out-win 2060 \
+  --no-offset --cache-name w206 --epochs 100
+```
+
 ### External UCI-HAR evaluation of a KFall checkpoint
 
 Use the same frozen KFall model; do not train a new six-class UCI model for

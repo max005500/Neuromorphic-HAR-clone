@@ -70,6 +70,18 @@ class UCIHAREventLoaderConfig:
     batch_size: int = 256
     num_workers: int = 4
     pin_memory: bool = True
+    sample_rate_hz: int = 50
+    window_stride: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.sample_rate_hz not in (50, 100):
+            raise ValueError("UCI sample_rate_hz must be 50 or 100.")
+        if not 2 <= self.raw_win <= round(2.56 * self.sample_rate_hz):
+            raise ValueError("raw_win must fit inside one 2.56 s UCI segment.")
+        if self.window_stride is not None and self.window_stride < 1:
+            raise ValueError("window_stride must be positive.")
+        if self.resolved_out_win() < 2:
+            raise ValueError("out_win must be at least 2.")
 
     def resolved_out_win(self) -> int:
         if self.out_win is not None:
@@ -86,7 +98,7 @@ class UCIHAREventDataset(Dataset):  # type: ignore[misc]
         if torch is None:
             raise ImportError("PyTorch is required to build UCIHAREventDataset.")
 
-        self.x_ev = torch.as_tensor(np.array(split["x_ev"], dtype=np.float32, copy=True))
+        self.x_ev = torch.as_tensor(np.array(split["x_ev"], copy=True))
         self.offset = torch.as_tensor(np.array(split["offset"], dtype=np.float32, copy=True))
         self.y = torch.as_tensor(np.array(split["y"], dtype=np.int64, copy=True))
         self.domain = torch.as_tensor(np.array(split["domain"], dtype=np.int64, copy=True))
@@ -242,8 +254,7 @@ def build_event_split(
 
     if X.shape[0] != y.size or X.shape[0] != domain.size:
         raise ValueError(f"Inconsistent split sizes for {name}: X={X.shape[0]}, y={y.size}, domain={domain.size}.")
-    if X.shape[1:] != (cfg.raw_win, cfg.n_ch):
-        raise ValueError(f"Expected X shape (N, {cfg.raw_win}, {cfg.n_ch}) for {name}. Got {X.shape}.")
+    X, y, domain = prepare_windows(X, y, domain, cfg)
 
     theta = np.asarray(cfg.theta_sd, dtype=np.float32)
     if theta.shape != (cfg.n_ch,):
@@ -284,6 +295,21 @@ def build_event_split(
     if verbose:
         print(f"[ucihar:split:{name}] Done | N={len(y)} | counts={named_class_counts(split['y'])}")
     return split
+
+
+def prepare_windows(X, y, domain, cfg: UCIHAREventLoaderConfig):
+    """Crop within source segments only, after subjects have been split."""
+    from preprocess.interpolate_signal import interpolate_to_times
+
+    X = _as_ucihar_x(X)
+    if cfg.sample_rate_hz == 100:
+        source_times = np.arange(128) / 50
+        target_times = np.arange(256) / 100
+        X = np.stack([interpolate_to_times(signal, source_times, target_times) for signal in X])
+    stride = cfg.window_stride or cfg.raw_win
+    starts = list(range(0, X.shape[1] - cfg.raw_win + 1, stride))
+    windows = np.stack([signal[start:start + cfg.raw_win] for signal in X for start in starts])
+    return windows, np.repeat(y, len(starts)), np.repeat(domain, len(starts))
 
 
 def save_event_splits(

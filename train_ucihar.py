@@ -57,7 +57,7 @@ DEFAULT_THETA_UCIHAR = [
 ]
 
 # CLI
-def get_args() -> argparse.Namespace:
+def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Train one UCI HAR single-head SCN from cached Sigma-Delta event tensors."
     )
@@ -76,6 +76,9 @@ def get_args() -> argparse.Namespace:
     # Event encoding
     p.add_argument("--ups", type=float, default=5.0, help="Upsampling factor for each UCI HAR window.")
     p.add_argument("--out-win", type=int, default=None, help="Explicit interpolated length. If omitted, derived from UPS.")
+    p.add_argument("--sample-rate-hz", type=int, choices=(50, 100), default=50)
+    p.add_argument("--raw-win", type=int, default=128, help="Window samples after optional 100 Hz resampling.")
+    p.add_argument("--window-stride", type=int, default=None, help="Crop stride within each source segment; default nonoverlapping.")
     p.add_argument("--dead-zone", type=float, default=0.5, help="Sigma-Delta dead-zone factor.")
     p.add_argument("--theta", type=float, nargs=6, default=DEFAULT_THETA_UCIHAR, help="Six-channel Sigma-Delta theta vector.")
     p.add_argument("--interp-method", default="linear", choices=["linear", "zoh", "cubic"], help="Interpolation method used before Sigma-Delta encoding.")
@@ -122,10 +125,15 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--p-drop", type=float, default=0.35, help="Dropout in the event branch.")
     p.add_argument("--merge-polarities", action="store_true", help="Merge positive and negative polarities before the first conv.")
     p.add_argument("--offset-hidden", type=int, default=8, help="Hidden units in the offset LIF branch.")
+    p.add_argument("--no-offset", dest="use_offset", action="store_false", default=True,
+                   help="Remove the auxiliary offset LIF branch entirely.")
     p.add_argument("--head-rate-scale", type=float, default=8.0, help="Rate scaling for spiking heads.")
     p.add_argument("--spiking-heads", action="store_true", help="Use spiking readout heads instead of dense heads.")
 
-    return p.parse_args()
+    cfg = p.parse_args(argv)
+    if cfg.epochs < 1 or cfg.batch_size < 1 or cfg.workers < 0:
+        p.error("epochs/batch-size must be positive and workers nonnegative.")
+    return cfg
 
 
 # Model
@@ -146,7 +154,9 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         split=tuple(float(x) for x in cfg.split),
         val_ratio=cfg.val_ratio,
         seed=cfg.seed,
-        raw_win=128,
+        raw_win=cfg.raw_win,
+        sample_rate_hz=cfg.sample_rate_hz,
+        window_stride=cfg.window_stride,
         ups=cfg.ups,
         out_win=cfg.out_win,
         interp_method=cfg.interp_method,
@@ -267,8 +277,8 @@ def run_epoch(
 
 
 # Main
-def main() -> None:
-    cfg = get_args()
+def main(argv: list[str] | None = None) -> None:
+    cfg = get_args(argv)
     set_seed(cfg.seed)
     dev = get_device(cfg.gpu)
 
@@ -308,6 +318,7 @@ def main() -> None:
             ("cache", Path(cfg.cache_dir) / f"ucihar_event_loader_{cfg.cache_name}"),
             ("ups_dead_zone", f"{cfg.ups}/{cfg.dead_zone}"),
             ("theta", np.asarray(cfg.theta, dtype=np.float32)),
+            ("use_offset", cfg.use_offset),
         ],
     )
 
