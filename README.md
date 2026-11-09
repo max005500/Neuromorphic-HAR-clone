@@ -429,6 +429,42 @@ These reports measure offline window classification; `lead_time_ms` describes
 the annotation at a window endpoint and is not an achieved continuous warning
 time.
 
+### External UCI-HAR evaluation of a KFall checkpoint
+
+Use the same frozen KFall model; do not train a new six-class UCI model for
+this comparison:
+
+```bash
+# Original held-out KFall subjects, including per-subject metrics.
+python evaluate_kfall.py --run-dir PATH_TO_KFALL_RUN --device cuda:0
+
+# UCI official test partition (default); --split all also includes UCI train.
+python evaluate_kfall_ucihar.py --run-dir PATH_TO_KFALL_RUN \
+  --dataset-root "data/UCI HAR Dataset" --device cuda:0 --batch-size 128
+```
+
+UCI walking/upstairs/downstairs are mapped to Dynamic, and
+sitting/standing/laying to Static. There are no Fall or PostImpact targets.
+Reports in `RUN/metrics/ucihar_test/` include the confusion matrix, predictions,
+classification metrics, per-subject metrics, and false-fall rates per original
+UCI activity. `fall_window_metrics` reports specificity and false-positive rate;
+fall recall/sensitivity is **undefined (`null`)**, not zero or 100%.
+PostImpact predictions are normal-activity classification errors, not Fall
+predictions. False-positive rates describe windows, not alerts/hour.
+
+The evaluator uses total acceleration in g, converts body gyroscope from
+rad/s to degrees/s, reorders channels to acceleration then gyroscope, and
+resamples from 50 Hz to the checkpoint's 100 Hz raw grid before applying its
+unchanged Sigma-Delta settings. No thresholds are tuned on UCI.
+Nonoverlapping crops are taken within each original segment; the UCI segments
+themselves overlap and cannot be treated as independent continuous recordings.
+Different sensors, placement, sampling and preprocessing create domain shift.
+
+UCI provides only 128 samples at 50 Hz (2.56 s by the sample-count convention).
+The 1.20 s and 2.06 s checkpoints can be evaluated; **3.20 s checkpoints are
+rejected** rather than padding or joining unrelated segments. Longer-window
+evaluation requires genuinely longer source signals.
+
 ## Interactive KFall window viewer
 
 Inspect the same encoded windows used by training alongside their original CSV

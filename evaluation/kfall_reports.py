@@ -54,7 +54,8 @@ def _fall_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
     }
 
 
-def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, class_names: tuple[str, ...] = CLASS_NAMES) -> None:
+def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, class_names: tuple[str, ...] = CLASS_NAMES,
+                    dataset: str = "KFall") -> None:
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -76,7 +77,7 @@ def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, clas
                     axis.text(column, row, label, ha="center", va="center",
                               color="white" if value > maximum / 2 else "#0f172a", fontsize=12)
             figure.colorbar(rendered, ax=axis, shrink=0.8)
-        figure.suptitle("KFall · clasificación de ventanas de test", fontsize=14)
+        figure.suptitle(f"{dataset} · clasificación de ventanas", fontsize=14)
         figure.savefig(path, dpi=160)
     finally:
         figure.clear()
@@ -139,7 +140,7 @@ def save_evaluation_reports(
         if truth[position] == 0 and "lead_time_ms" in split:
             lead_time = _strict_values(float(split["lead_time_ms"][index]))
         csv_rows.append({
-            "window_index": index, "split": "test", "subject": subject,
+            "window_index": index, "split": summary.get("split", "test"), "subject": subject,
             "file": str(record["file"]), "code": record["code"], "trial": record["trial"],
             "start": int(split["start"][index]), "end_frame": int(split["end_frame"][index]),
             "true_class_id": int(truth[position]), "true_class": class_names[truth[position]],
@@ -162,8 +163,17 @@ def save_evaluation_reports(
     per_subject = {}
     for subject in sorted(np.unique(subjects).tolist()):
         selected = subjects == subject
+        subject_report = classification_report(truth[selected], predicted[selected],
+                                               output_dict=True, **report_arguments)
+        subject_counts = confusion_matrix(truth[selected], predicted[selected], labels=list(range(n_classes)))
+        subject_support = subject_counts.sum(axis=1)
+        present = subject_support > 0
         per_subject[str(subject)] = {
             "n": int(selected.sum()), "accuracy": float(np.mean(truth[selected] == predicted[selected])),
+            "balanced_accuracy": float(np.mean(np.diag(subject_counts)[present] / subject_support[present])),
+            "macro_f1": subject_report["macro avg"]["f1-score"],
+            "weighted_f1": subject_report["weighted avg"]["f1-score"],
+            "per_class": {name: subject_report[name] for name in class_names},
             "class_counts": {name: int(np.sum(truth[selected] == label)) for label, name in enumerate(class_names)},
             "fall_window_metrics": _fall_metrics(truth[selected], predicted[selected]),
         }
@@ -177,8 +187,8 @@ def save_evaluation_reports(
         "class_counts": {name: int(np.sum(truth == label)) for label, name in enumerate(class_names)},
         "predicted_class_counts": {name: int(np.sum(predicted == label)) for label, name in enumerate(class_names)},
         "fall_window_metrics": _fall_metrics(truth, predicted), "per_subject": per_subject,
-        "evaluation_scope": "offline_test_window_classification",
-        "timing_note": "lead_time_ms is the annotated time remaining before impact at a window endpoint; it is not measured warning time from a continuous alerting system.",
+        "evaluation_scope": summary.get("evaluation_scope", "offline_test_window_classification"),
+        "timing_note": summary.get("timing_note", "lead_time_ms is the annotated time remaining before impact at a window endpoint; it is not measured warning time from a continuous alerting system."),
     }
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +206,8 @@ def save_evaluation_reports(
     _save_json(output_dir / "classification_report.json", report)
     (output_dir / "classification_report.txt").write_text(
         classification_report(truth, predicted, digits=4, **report_arguments), encoding="utf-8")
-    _confusion_plot(output_dir / "confusion_matrix.png", counts, normalized, class_names)
+    _confusion_plot(output_dir / "confusion_matrix.png", counts, normalized, class_names,
+                    str(summary.get("dataset", "KFall")))
     metrics = _strict_values(metrics)
     _save_json(output_dir / "metrics.json", metrics)
     return metrics
