@@ -186,6 +186,7 @@ def main(argv: list[str] | None = None) -> None:
                 "--gpu", str(args.gpu),
                 "--patience", str(args.patience),
                 "--post-impact-seconds", str(args.post_impact_seconds),
+                "--quiet-loader",
                 "--exclude-tasks", *args.exclude_tasks,
             ]
             if label_dir is not None:

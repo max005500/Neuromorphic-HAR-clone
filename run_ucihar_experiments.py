@@ -104,6 +104,7 @@ def main(argv=None):
                 "--batch-size", str(args.batch_size), "--workers", str(args.workers),
                 "--gpu", str(args.gpu), "--patience", str(args.patience),
                 "--theta", *map(str, args.theta), "--dead-zone", str(args.dead_zone),
+                "--quiet-loader",
             ]
             if not enabled:
                 command.append("--no-offset")

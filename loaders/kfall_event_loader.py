@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-from tqdm.auto import tqdm
 
 from loaders import utils as u
 from labeling.kfall_manual_labels import load_manual_labels
@@ -183,7 +182,6 @@ def build_event_split(
         for key, (shape, dtype) in shapes.items()
     }
     cursor = 0
-    progress = tqdm(total=count, desc=f"Encode KFall {name}", unit="window", dynamic_ncols=True, disable=not verbose)
     for fi, starts in selected:
         signal = np.asarray(recordings[fi], dtype=np.float32)
         info = metadata[fi]
@@ -211,8 +209,8 @@ def build_event_split(
                 if activity == 0 else np.nan
             )
             cursor += 1
-            progress.update(1)
-    progress.close()
+            if verbose and cfg.verbose_every and cursor % cfg.verbose_every == 0:
+                print(f"[kfall:{name}] Encoded {cursor}/{count} windows.")
     for array in arrays.values():
         if isinstance(array, np.memmap):
             array.flush()
@@ -268,16 +266,7 @@ def load_or_build_kfall_event_splits(
         output, output / "metadata.json", expected, split_names=SPLIT_NAMES, array_keys=ARRAY_KEYS,
         metadata_keys=("version", "dataset_root", "label_dir", "config", "source_signature", "manual_annotation_signature"),
     ):
-        metadata = u.load_json(output / "metadata.json")
-        if cfg.excluded_tasks:
-            unexpected = sorted({record["code"] for record in metadata["recordings"]
-                                 if record["code"] in cfg.excluded_tasks})
-            if unexpected:
-                raise ValueError(f"Cached recordings contain excluded tasks {unexpected}; rebuild with --refresh-cache.")
-            print(f"[tasks:cache] excluded={list(cfg.excluded_tasks)} "
-                  f"| removed={metadata['raw_data']['excluded_recordings']} recordings "
-                  f"| retained={len(metadata['recordings'])}")
-        return load_event_splits(output, mmap_mode, verbose), metadata
+        return load_event_splits(output, mmap_mode, verbose), u.load_json(output / "metadata.json")
 
     recordings, labels, records, skipped = load_kfall_3class(root, label_dir=labels_root)
     if manual_records is not None:

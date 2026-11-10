@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-from tqdm.auto import tqdm
 
 try:  # Torch is only required when DataLoader objects are requested.
     import torch
@@ -273,8 +272,7 @@ def build_event_split(
     if verbose:
         print(f"[ucihar:split:{name}] Encoding X={X.shape} -> x_ev={ev.shape} | UPS={cfg.ups} | Te={out_win} | dead_zone={cfg.dead_zone}")
 
-    for i in tqdm(range(X.shape[0]), desc=f"Encode UCI {name}", unit="window",
-                  dynamic_ncols=True, disable=not verbose):
+    for i in range(X.shape[0]):
         if plan is not None:
             x_ip = resample_window_linear_exact(X[i], plan=plan)
         else:
@@ -284,6 +282,8 @@ def build_event_split(
         ev_i = out[0] if isinstance(out, (tuple, list)) else out
         ev[i] = np.asarray(ev_i, dtype=ev_dtype)
 
+        if verbose and cfg.verbose_every and (i + 1) % int(cfg.verbose_every) == 0:
+            print(f"[ucihar:split:{name}] Encoded windows: {i + 1}/{X.shape[0]}")
 
     split = {
         "x_ev": ev,

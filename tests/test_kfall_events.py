@@ -176,17 +176,7 @@ class KFallEventTests(unittest.TestCase):
                 self.assertLess(len(arrays["y_h1"]), len(original[name]["y_h1"]))
                 for index in arrays["file_idx"]:
                     self.assertNotIn(after["recordings"][int(index)]["code"], DEFAULT_EXCLUDED_TASKS)
-            output = io.StringIO()
-            with patch("loaders.kfall_event_loader.load_kfall_3class", side_effect=AssertionError("cache missed")), \
-                    contextlib.redirect_stdout(output):
-                load_or_build_kfall_event_splits(cfg=cfg, **kwargs)
-            self.assertIn("[tasks:cache]", output.getvalue())
-            self.assertIn("removed=36 recordings | retained=9", output.getvalue())
-            cache_metadata = root / "cache" / "kfall_event_loader_default" / "metadata.json"
-            corrupted = json.loads(cache_metadata.read_text())
-            corrupted["recordings"][0]["code"] = "T05"
-            cache_metadata.write_text(json.dumps(corrupted))
-            with self.assertRaisesRegex(ValueError, "contain excluded tasks"):
+            with patch("loaders.kfall_event_loader.load_kfall_3class", side_effect=AssertionError("cache missed")):
                 load_or_build_kfall_event_splits(cfg=cfg, **kwargs)
             _, restored = load_or_build_kfall_event_splits(cfg=self.cfg, **kwargs)
             self.assertEqual(len(restored["recordings"]), 45)
