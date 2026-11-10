@@ -8,7 +8,6 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm.auto import tqdm
 
-from models.recurrent import LIFState
 from train.utils import make_autocast
 
 
@@ -124,7 +123,7 @@ def run_epoch(model, loader, dev, cfg, optimizer=None, scaler=None,
             reset[slots[batch["reset"]]] = True
             resets += int(batch["reset"].sum())
             if state is not None:
-                state = LIFState(*(torch.where(reset[:, None], torch.zeros_like(value), value) for value in state))
+                state = type(state)(*(torch.where(reset[:, None], torch.zeros_like(value), value) for value in state))
             if training:
                 optimizer.zero_grad(set_to_none=True)
             values = batch["x"].to(dev, non_blocking=True).float()

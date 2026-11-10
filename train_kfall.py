@@ -102,12 +102,14 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--sd-init", choices=["x0", "zero"], default=defaults.sd_init)
 
     p.add_argument("--head-mode", choices=["single", "dual"], default="single", help="Activity single head, or dual architecture with the unannotated posture head disabled.")
-    p.add_argument("--architecture", choices=("scn", "compact", "compact_recurrent"), default="scn")
+    p.add_argument("--architecture", choices=("scn", "compact", "compact_recurrent", "compact_adaptive"), default="scn")
     p.add_argument("--sequence-length", type=int, default=32, help="Decisions per truncated BPTT chunk; recurrent model only.")
     p.add_argument("--recurrent-batch-size", type=int, default=1,
                    help="Independent recording streams trained in parallel (default 1).")
     p.add_argument("--recurrent-hidden", type=int, default=32)
     p.add_argument("--recurrent-beta", type=float, default=0.9)
+    p.add_argument("--adaptation-decay", type=float, default=0.95)
+    p.add_argument("--adaptation-strength", type=float, default=0.5)
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--run", default="kfall_scn")
     p.add_argument("--epochs", type=int, default=100)
@@ -155,10 +157,16 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("sequence-length, recurrent-hidden and recurrent-batch-size must be positive.")
     if not np.isfinite(cfg.recurrent_beta) or not 0 <= cfg.recurrent_beta < 1:
         p.error("recurrent-beta must be finite in [0, 1).")
-    if cfg.architecture == "compact_recurrent" and (cfg.head_mode != "single" or cfg.spiking_heads):
-        p.error("compact_recurrent uses a single lightweight dense readout; do not enable dual/spiking-heads.")
-    if cfg.architecture == "compact_recurrent" and cfg.hard_reset:
-        p.error("compact_recurrent implements the proposed soft-reset recurrence; omit --hard-reset.")
+    if not np.isfinite(cfg.adaptation_decay) or not 0 < cfg.adaptation_decay < 1:
+        p.error("adaptation-decay must be finite in (0, 1).")
+    if not np.isfinite(cfg.adaptation_strength) or cfg.adaptation_strength <= 0:
+        p.error("adaptation-strength must be finite and positive.")
+    if cfg.architecture == "compact_adaptive" and cfg.recurrent_beta == 0:
+        p.error("compact_adaptive requires recurrent-beta in (0, 1).")
+    if cfg.architecture in ("compact_recurrent", "compact_adaptive") and (cfg.head_mode != "single" or cfg.spiking_heads):
+        p.error("Recurrent architectures use a single dense readout; do not enable dual/spiking-heads.")
+    if cfg.architecture in ("compact_recurrent", "compact_adaptive") and cfg.hard_reset:
+        p.error("Recurrent architectures use soft reset; omit --hard-reset.")
     cfg.n_ch = 6
     cfg.dataset = "kfall"
     cfg.n_classes = 4 if cfg.post_impact_seconds > 0 else 3
@@ -205,7 +213,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
                     for name, split in splits.items()}
     else:
         datasets = {name: KFallTrainingDataset(split) for name, split in splits.items()}
-    if cfg.architecture == "compact_recurrent":
+    if cfg.architecture in ("compact_recurrent", "compact_adaptive"):
         from train.kfall_recurrent import make_sequence_loader
 
         loaders = {name: make_sequence_loader(dataset, splits[name], cfg, dev, train=name == "train")
@@ -227,11 +235,16 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
 
 def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
     kwargs = scn_model_kwargs(cfg)
-    if getattr(cfg, "architecture", "scn") == "compact_recurrent":
+    if getattr(cfg, "architecture", "scn") in ("compact_recurrent", "compact_adaptive"):
         from models.recurrent import CompactRecurrentSCN
 
-        return CompactRecurrentSCN(n_classes=cfg.n_classes, hidden_size=cfg.recurrent_hidden,
-                                    recurrent_beta=cfg.recurrent_beta, **kwargs).to(dev)
+        return CompactRecurrentSCN(
+            n_classes=cfg.n_classes, hidden_size=cfg.recurrent_hidden,
+            recurrent_beta=cfg.recurrent_beta,
+            adaptive=cfg.architecture == "compact_adaptive",
+            adaptation_decay=getattr(cfg, "adaptation_decay", 0.95),
+            adaptation_strength=getattr(cfg, "adaptation_strength", 0.5), **kwargs,
+        ).to(dev)
     if cfg.head_mode == "single":
         return SingleHeadSCN(n_classes=cfg.n_classes, **kwargs).to(dev)
     model = DualHeadSCN(n_classes_head1=cfg.n_classes, **kwargs).to(dev)
@@ -284,7 +297,7 @@ def main(argv: list[str] | None = None) -> None:
     print_kv_block("run", [("dataset", "KFall"), ("device", dev), ("run_dir", run_dir), ("head_mode", cfg.head_mode), ("fall_policy", cfg.fall_policy), ("use_offset", cfg.use_offset), ("params", total), ("trainable", trainable)])
     if cfg.head_mode == "dual":
         print("[head2] No temporal posture labels are available in KFall; posture loss and head parameters are disabled.")
-    if cfg.architecture == "compact_recurrent":
+    if cfg.architecture in ("compact_recurrent", "compact_adaptive"):
         print(f"[temporal] architecture={cfg.architecture} | parameters={total} | chunk={cfg.sequence_length} decisions "
               f"| streams={cfg.recurrent_batch_size} | max_windows_per_step={cfg.sequence_length * cfg.recurrent_batch_size} "
               f"| nominal_step={cfg.stride / 100:.3f}s | batch-size ignored (use recurrent-batch-size).")
@@ -295,7 +308,7 @@ def main(argv: list[str] | None = None) -> None:
 
     def epoch_runner(loader, optimizer=None, scaler=None, collect_predictions=False):
         kwargs = dict(optimizer=optimizer, scaler=scaler, class_weight=class_weight, collect_predictions=collect_predictions)
-        if cfg.architecture == "compact_recurrent":
+        if cfg.architecture in ("compact_recurrent", "compact_adaptive"):
             from train.kfall_recurrent import run_epoch
 
             return run_epoch(model, loader, dev, cfg, **kwargs)
@@ -322,7 +335,7 @@ def main(argv: list[str] | None = None) -> None:
     checkpoint = torch.load(ckpt_path, map_location=dev, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     test_metrics = epoch_runner(data["loaders"]["test"], collect_predictions=True)
-    if cfg.architecture == "compact_recurrent":
+    if cfg.architecture in ("compact_recurrent", "compact_adaptive"):
         from evaluation.kfall_reports import save_evaluation_reports
 
         probabilities = test_metrics.pop("probabilities")
@@ -356,12 +369,12 @@ def main(argv: list[str] | None = None) -> None:
         parameters=total,
         parameter_bytes=sum(p.numel() * p.element_size() for p in model.parameters()),
     )
-    if cfg.architecture == "compact_recurrent":
+    if cfg.architecture in ("compact_recurrent", "compact_adaptive"):
         test_metrics.update(
             sequence_length=cfg.sequence_length,
             recurrent_batch_size=cfg.recurrent_batch_size,
             recurrent_hidden=cfg.recurrent_hidden,
-            recurrent_state_fp32_bytes_per_stream=2 * cfg.recurrent_hidden * 4,
+            recurrent_state_fp32_bytes_per_stream=(3 if cfg.architecture == "compact_adaptive" else 2) * cfg.recurrent_hidden * 4,
             state_protocol="reset per recording/gap; persist and detach across chronological chunks",
             nominal_decision_interval_seconds=cfg.stride / 100,
         )

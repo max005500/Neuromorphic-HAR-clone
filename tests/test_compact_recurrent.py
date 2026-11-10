@@ -12,20 +12,86 @@ import numpy as np
 import torch
 
 from evaluate_kfall import evaluate_run
-from models.recurrent import CompactRecurrentSCN, RecurrentLIF
+from models.recurrent import ALIFState, AdaptiveRecurrentLIF, CompactRecurrentSCN, RecurrentLIF
 from train.kfall_recurrent import RecordingChunkSampler, make_sequence_loader, recording_sequences, run_epoch
 from train_kfall import KFallTrainingDataset, build_model, get_args, main
 from test_kfall_training import fixture_args, write_fixture
 
 
 class CompactRecurrentTests(unittest.TestCase):
+    def test_adaptive_dynamics_learnable_decays_and_masked_state(self):
+        cell = AdaptiveRecurrentLIF(1, 1, beta=0.5, threshold=0.5,
+                                   adaptation_decay=0.5, adaptation_strength=0.5)
+        with torch.no_grad():
+            cell.input.weight.fill_(1)
+            cell.input.bias.zero_()
+            cell.recurrent.weight.fill_(0.25)
+        features = torch.tensor([[[0.8], [0.7], [0.9]]], requires_grad=True)
+        spikes, state = cell(features)
+        # u: .8 -> .85 -> 1.325; a: 0 -> 1 -> .5; thresholds: .5, 1, .75.
+        torch.testing.assert_close(spikes, torch.tensor([[[1.], [0.], [1.]]]))
+        torch.testing.assert_close(state.membrane, torch.tensor([[1.325]]))
+        torch.testing.assert_close(state.adaptation, torch.tensor([[0.5]]))
+        spikes.sum().backward()
+        for parameter in (cell.membrane_logit, cell.adaptation_logit, cell.strength_raw,
+                          cell.recurrent.weight):
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad).all())
+            self.assertGreater(float(parameter.grad.abs().sum()), 0)
+        frozen = state.detach()
+        self.assertIsInstance(frozen, ALIFState)
+        self.assertTrue(all(value.grad_fn is None for value in frozen))
+        output, unchanged = cell(features.detach(), frozen, torch.zeros((1, 3), dtype=torch.bool))
+        self.assertEqual(float(output.detach().sum()), 0)
+        for actual, expected in zip(unchanged, frozen):
+            torch.testing.assert_close(actual, expected)
+
+    def test_adaptive_chunk_equivalence_causality_and_checkpoint_replay(self):
+        torch.manual_seed(19)
+        cfg = get_args(["--architecture", "compact_adaptive"])
+        model = build_model(cfg, torch.device("cpu")).eval()
+        self.assertEqual(sum(p.numel() for p in model.parameters()), 22252)
+        events = torch.randint(0, 2, (2, 4, 128, 6, 2)).float()
+        offsets = torch.randn(2, 4, 6)
+        with torch.inference_mode():
+            full, final, _ = model(events, offsets)
+            first, state, _ = model(events[:, :2], offsets[:, :2])
+            last, end, _ = model(events[:, 2:], offsets[:, 2:], state)
+            torch.testing.assert_close(torch.cat([first, last], 1), full)
+            for value, expected in zip(end, final):
+                torch.testing.assert_close(value, expected)
+            changed = events.clone()
+            changed[:, 2:] = 0
+            other, _, _ = model(changed, offsets)
+            torch.testing.assert_close(other[:, :2], full[:, :2])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_fixture(root)
+            args = fixture_args(root) + [
+                "--architecture", "compact_adaptive", "--post-impact-seconds", "1.2",
+                "--raw-win", "120", "--stride", "30", "--sequence-length", "2",
+                "--recurrent-batch-size", "2", "--no-progress",
+            ]
+            with patch("train_kfall.get_device", return_value=torch.device("cpu")), contextlib.redirect_stdout(io.StringIO()):
+                main(args)
+                run = next((root / "runs").iterdir())
+                metrics = evaluate_run(run, device="cpu", output_dir=root / "replay")
+            np.testing.assert_allclose(
+                np.load(run / "metrics" / "test_best" / "probabilities.npy"),
+                np.load(root / "replay" / "probabilities.npy"), atol=1e-6,
+            )
+            self.assertEqual(metrics["architecture"], "compact_adaptive")
+            self.assertEqual(metrics["sequence_resets"], 3)
+            saved = torch.load(run / "checkpoints" / "best_model.pt", weights_only=True)
+            self.assertIn("temporal.adaptation_logit", saved["model_state_dict"])
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
     def test_cuda_parallel_streams_amp_and_worker_loading(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             write_fixture(root)
             args = fixture_args(root) + [
-                "--architecture", "compact_recurrent", "--post-impact-seconds", "1.2",
+                "--architecture", "compact_adaptive", "--post-impact-seconds", "1.2",
                 "--raw-win", "120", "--stride", "30", "--sequence-length", "2",
                 "--recurrent-batch-size", "2", "--cache-format", "pt",
                 "--no-progress", "--amp", "--workers", "2",

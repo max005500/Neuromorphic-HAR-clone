@@ -20,6 +20,69 @@ class LIFState(NamedTuple):
         return LIFState(self.membrane.detach(), self.spikes.detach())
 
 
+class ALIFState(NamedTuple):
+    membrane: torch.Tensor
+    spikes: torch.Tensor
+    adaptation: torch.Tensor
+
+    def detach(self) -> ALIFState:
+        return ALIFState(*(value.detach() for value in self))
+
+
+class AdaptiveRecurrentLIF(nn.Module):
+    """LSNN-inspired recurrence with learned bounded decays and threshold adaptation."""
+
+    def __init__(self, input_size: int, hidden_size: int = 32, beta: float = 0.9,
+                 threshold: float = 0.5, adaptation_decay: float = 0.95,
+                 adaptation_strength: float = 0.5):
+        super().__init__()
+        if not 0 < beta < 1 or not 0 < adaptation_decay < 1:
+            raise ValueError("Adaptive decays must be strictly between zero and one.")
+        if not math.isfinite(adaptation_strength) or adaptation_strength <= 0:
+            raise ValueError("Adaptation strength must be finite and positive.")
+        base = RecurrentLIF(input_size, hidden_size, beta, threshold)
+        self.input, self.recurrent = base.input, base.recurrent
+        self.hidden_size, self.threshold = hidden_size, float(threshold)
+        self.membrane_logit = nn.Parameter(torch.full((hidden_size,), math.log(beta / (1 - beta))))
+        self.adaptation_logit = nn.Parameter(torch.full(
+            (hidden_size,), math.log(adaptation_decay / (1 - adaptation_decay))))
+        self.strength_raw = nn.Parameter(torch.full(
+            (hidden_size,), math.log(math.expm1(adaptation_strength))))
+
+    def forward(self, features, state: ALIFState | None = None, mask=None):
+        if features.ndim != 3 or features.shape[1] < 1:
+            raise ValueError("Adaptive features must have shape (B, decisions, features).")
+        if mask is not None and (mask.shape != features.shape[:2] or mask.dtype != torch.bool):
+            raise ValueError("Adaptive mask must be boolean (B, decisions).")
+        if state is None:
+            zeros = features.new_zeros(features.shape[0], self.hidden_size)
+            state = ALIFState(zeros, torch.zeros_like(zeros), torch.zeros_like(zeros))
+        if not isinstance(state, ALIFState):
+            raise ValueError("Adaptive recurrence requires ALIFState.")
+        if any(value.shape != (features.shape[0], self.hidden_size) or value.device != features.device
+               for value in state):
+            raise ValueError("Adaptive state must match batch, hidden size and device.")
+        beta, rho = self.membrane_logit.sigmoid(), self.adaptation_logit.sigmoid()
+        strength = torch.nn.functional.softplus(self.strength_raw)
+        outputs = []
+        for t, current in enumerate(features.unbind(1)):
+            previous_threshold = self.threshold + strength * state.adaptation
+            adaptation = rho * state.adaptation + state.spikes
+            threshold = self.threshold + strength * adaptation
+            membrane = (beta * state.membrane + self.input(current)
+                        + self.recurrent(state.spikes) - previous_threshold * state.spikes)
+            spikes = TriangularSurrogate.apply(membrane - threshold, 1.0)
+            updated = ALIFState(membrane, spikes, adaptation)
+            if mask is None:
+                state = updated
+                outputs.append(spikes)
+            else:
+                valid = mask[:, t:t + 1]
+                state = ALIFState(*(torch.where(valid, new, old) for new, old in zip(updated, state)))
+                outputs.append(torch.where(valid, spikes, torch.zeros_like(spikes)))
+        return torch.stack(outputs, dim=1), state
+
+
 class RecurrentLIF(nn.Module):
     """u[t] = beta*u[t-1] + W*x[t] + R*s[t-1] - threshold*s[t-1]."""
 
@@ -76,7 +139,9 @@ class CompactRecurrentSCN(nn.Module):
     """
 
     def __init__(self, n_classes: int = 4, hidden_size: int = 32,
-                 recurrent_beta: float = 0.9, **encoder_kwargs):
+                 recurrent_beta: float = 0.9, adaptive: bool = False,
+                 adaptation_decay: float = 0.95, adaptation_strength: float = 0.5,
+                 **encoder_kwargs):
         super().__init__()
         encoder_kwargs = dict(encoder_kwargs)
         encoder_kwargs.setdefault("conv_channels", (16, 32, 32))
@@ -84,12 +149,17 @@ class CompactRecurrentSCN(nn.Module):
         encoder_kwargs["backbone"] = True
         encoder_kwargs["spiking_heads"] = False
         self.encoder = DualHeadSCN(**encoder_kwargs)
-        self.temporal = RecurrentLIF(self.encoder.fused_dim, hidden_size,
-                                     recurrent_beta, encoder_kwargs.get("thresh", 0.5))
+        if adaptive:
+            self.temporal = AdaptiveRecurrentLIF(
+                self.encoder.fused_dim, hidden_size, recurrent_beta,
+                encoder_kwargs.get("thresh", 0.5), adaptation_decay, adaptation_strength)
+        else:
+            self.temporal = RecurrentLIF(self.encoder.fused_dim, hidden_size,
+                                         recurrent_beta, encoder_kwargs.get("thresh", 0.5))
         self.head = nn.Linear(hidden_size, n_classes)
 
     def forward(self, events: torch.Tensor, offset: torch.Tensor | None = None,
-                state: LIFState | None = None, mask: torch.Tensor | None = None):
+                state: LIFState | ALIFState | None = None, mask: torch.Tensor | None = None):
         if events.ndim != 5 or events.shape[-2:] != (6, 2) or events.shape[1] < 1:
             raise ValueError("Recurrent SCN expects (B, decisions, event_steps, 6, 2).")
         batch, steps = events.shape[:2]

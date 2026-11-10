@@ -141,7 +141,7 @@ def evaluate_run(
         raise ValueError(f"Unknown checkpoint class weighting: {cfg.class_weight}.")
 
     inference_started = time.perf_counter()
-    temporal = getattr(cfg, "architecture", "scn") == "compact_recurrent"
+    temporal = getattr(cfg, "architecture", "scn") in ("compact_recurrent", "compact_adaptive")
     recurrent_metrics = {}
     if temporal:
         from train.kfall_recurrent import make_sequence_loader, run_epoch

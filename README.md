@@ -235,8 +235,10 @@ The default KFall subject proportions are approximately 60% training, 30% valida
 T16, T18, and T19** by default because of annotation quality concerns. All
 repetitions and subjects are excluded from train, validation, and test; source
 CSVs and annotations are not modified. The filter and removed recording/sample
-counts are saved in cache metadata and copied into each run. Changing the
-filter invalidates the cache, including derived PT files. Use a separate cache
+counts are saved in cache metadata and copied into each run.
+Cached loads also print `[tasks:cache]` with excluded tasks and removed/retained
+recording counts, and reject manifests containing an excluded task.
+Changing the filter invalidates the cache, including derived PT files. Use a separate cache
 and output folder to preserve earlier experiments:
 
 ```bash
@@ -413,6 +415,58 @@ Only the recurrent memory persists between decisions; the encoder/backbone
 still recomputes overlapping windows. No hardware latency/energy or accuracy
 improvement is claimed. Compare the original, compact and recurrent models
 with identical splits, windows, thresholds and seeds before selecting one.
+
+### Adaptive spiking recurrence inspired by LSNN / Adaptive SRNN
+
+`--architecture compact_adaptive` retains our compact convolutional LIF
+encoder, offset fusion and triangular spike surrogate, but replaces the
+fixed-threshold recurrent cell with adaptive LIF neurons:
+
+```text
+a[t]     = rho * a[t-1] + s[t-1]
+theta[t] = theta0 + strength * a[t]
+u[t]     = beta * u[t-1] + W*z[t] + R*s[t-1] - theta[t-1]*s[t-1]
+s[t]     = H(u[t] - theta[t])
+```
+
+Each neuron has trainable `beta`, `rho` and adaptation strength. Sigmoid
+parameterization bounds decays to (0,1); softplus keeps strength positive.
+Initial values are controlled by `--recurrent-beta 0.9`,
+`--adaptation-decay 0.95`, and `--adaptation-strength 0.5`.
+These constants are per decision, not milliseconds; changing stride changes
+their physical time scale. Gradients propagate through adaptation, membrane
+and spikes within each truncated BPTT chunk.
+
+The default four-class model with offsets has **22,252 parameters**, just
+96 more than the fixed-LIF recurrent variant. Its explicit `ALIFState`
+contains membrane, spikes and adaptation (384 FP32 bytes/stream at 32
+neurons). All three states persist/detach across chunks, reset per
+recording/gap and remain frozen for masked padding.
+
+```bash
+python train_kfall.py --architecture compact_adaptive \
+  --raw-win 120 --out-win 1200 --stride 10 \
+  --sequence-length 32 --recurrent-batch-size 128 \
+  --post-impact-seconds 1.2 --split 0.6 0.3 0.1 \
+  --epochs 100 --workers 4 --gpu 0 --seed 0 \
+  --cache-format pt --cache-dir data/kfall_cache_recurrent \
+  --cache-name w120_s10 --run kfall_adaptive_w120 \
+  --out-dir results/kfall_adaptive_w120
+```
+
+The event cache can be shared with the fixed-LIF model. Task exclusions,
+parallel stream isolation, progress bars, no-offset ablation and
+`evaluate_kfall.py` replay remain supported. Use equal splits, encoder,
+stride, sequence length, batch settings and seeds when comparing models;
+do not tune using test. Existing compact recurrent checkpoints remain
+fixed-LIF and load unchanged.
+
+This is an **adaptation**, not an exact reproduction of either reference:
+[Bellec et al., NeurIPS 2018, LSNN](https://arxiv.org/abs/1803.09574) and
+[Yin, Corradi & Bohté, 2021, Adaptive SRNN](https://doi.org/10.1038/s42256-021-00397-w).
+Our temporal cell operates on fused window firing rates, not directly on the
+original event stream. No accuracy gain, energy gain, quantized deployment
+or hardware real-time deadline is assumed from these references.
 
 ### GPU utilization
 
