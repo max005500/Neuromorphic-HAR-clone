@@ -90,6 +90,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--cache-format", choices=("npy", "pt"), default="npy",
                    help="pt saves/reuses tensor views, avoiding per-sample NumPy copies (default npy).")
     p.add_argument("--preprocess-only", action="store_true", help="Build and inspect event splits without training.")
+    p.add_argument("--skip-test", action="store_true", help="Hyperparameter search: save validation selection without evaluating test.")
     p.add_argument("--split", type=float, nargs=3, default=list(defaults.split), metavar=("TRAIN", "VAL", "TEST"), help="Fractions of subjects; every subject belongs to exactly one split (default 60/30/10).")
     p.add_argument("--raw-win", type=int, default=defaults.raw_win, help="Raw window samples at 100 Hz (default 205).")
     p.add_argument("--out-win", type=int, default=defaults.out_win, help="Event time steps after interpolation (default 2048).")
@@ -282,6 +283,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     if not ckpt_path.is_file():
         raise RuntimeError("No checkpoint was saved. Check training/validation loss values.")
+    if cfg.skip_test:
+        save_json(metrics_dir / "validation_selection.json", {
+            "best_val_loss": fit_result["best_val"], "best_epoch": fit_result["best_epoch"],
+            "test_evaluated": False, "parameters": total,
+        })
+        print(f"[done] validation-only saved_run={run_dir}")
+        return
     checkpoint = torch.load(ckpt_path, map_location=dev, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     test_metrics = epoch_runner(data["loaders"]["test"], collect_predictions=True)

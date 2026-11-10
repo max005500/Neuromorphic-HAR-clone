@@ -378,6 +378,62 @@ python train_kfall.py --no-offset --raw-win 206 --out-win 2060 --stride 103 \
 
 ## Evaluate the best KFall checkpoint
 
+### Train-only theta calibration and validation-only SCN ablations
+
+The original SCN can be optimized in two separate stages:
+
+```bash
+python calibrate_kfall_theta.py --dataset-root data/KFall \
+  --raw-win 120 --out-win 1200 --per-regime 10 \
+  --split 0.6 0.3 0.1 --seed 0 \
+  --output results/kfall_calibration/theta.json
+
+python run_kfall_ablations.py --theta-file results/kfall_calibration/theta.json \
+  --dataset-root data/KFall --raw-win 120 --out-win 1200 --stride 60 \
+  --gpus 0 --epochs 100 --batch-size 1024 --workers 4 \
+  --output-dir results/kfall_ablations
+```
+
+Calibration selects one equal-length crop from each of 10 recordings in each
+training-motion tertile (low/medium/high accelerometer variability), spreading
+selection across subjects. These are motion proxies, not new activity labels.
+Excluded tasks remain excluded. Each accelerometer theta is searched over a
+finite candidate list in g; gyroscope theta remains unchanged. The objective
+is mean per-window, per-axis reconstruction NRMSE with a 0.001 scale floor,
+fixed dead-zone=0.5 and x0 initialization. Spike fractions, selected files,
+subjects, crops, candidates and source signatures are recorded in JSON.
+Reconstruction error alone is not a classification/energy optimum; compare
+the calibrated theta against the original encoder on validation.
+
+The ablation runner screens 12 configurations, changing **one factor at a
+time** from the original baseline: tau, LIF threshold, hard/soft reset,
+dropout, convolution widths and kernels. This is not a full grid or a
+guaranteed optimum; interactions require a subsequent focused search.
+Use `--dry-run` to inspect `plan.json` without encoding/training.
+For several GPUs, use e.g. `--gpus 0 1 2 3`: each GPU runs one training
+process at a time. Shared event caches are prepared before parallel jobs.
+Logs are per trial; `summary.xlsx`/`summary.json` update after every trial.
+Both stages show progress with `tqdm`. Install the updated requirements first
+if it is not already available in the training environment.
+Completed trials resume from their result files; failed trials remain
+explicit and are retried. Keep the output directory dedicated to this
+protocol: incompatible plans require a different output directory.
+Batch size is fixed across all variants; reduce it uniformly on
+out-of-memory errors. The search is not launched automatically.
+
+Each checkpoint is selected by minimum validation loss. The Excel includes
+validation accuracy/loss and parameter count; the best configuration is
+written to `best_validation.json`, selected by validation loss (accuracy
+breaks ties). `--skip-test` prevents test inference during every search trial.
+Only after finalizing hyperparameters, run `evaluate_kfall.py` on the selected
+run to obtain the held-out test metrics. The cache may contain test windows,
+but no test objective is used for calibration or selection.
+
+This protocol is a subject-independent 60/30/10 holdout, **not LOSO**. A LOSO
+study would require separate train-only calibration and model selection for
+each outer held-out subject. Repeat holdout seeds and finalize the search
+before reporting test performance.
+
 Evaluate an existing run without training again:
 
 ```bash
