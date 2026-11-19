@@ -195,7 +195,8 @@ def evaluate_run(
             "probabilities": {CLASS_NAMES[key]: float(probability[0, key]) for key in range(cfg.n_classes)},
         }
     return save_evaluation_reports(destination, y_true=y_true, probabilities=probability,
-                                   window_indices=indices, split=split, metadata=metadata, summary=summary)
+                                   window_indices=indices, split=split, metadata=metadata, summary=summary,
+                                   subject_matrices=subject is None and window is None)
 
 
 def build_parser() -> argparse.ArgumentParser:

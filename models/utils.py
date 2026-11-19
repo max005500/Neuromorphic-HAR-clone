@@ -97,6 +97,33 @@ class LIFSpike(nn.Module):
         return torch.stack(spikes, dim=2)
 
 
+class RecurrentLIF(LIFSpike):
+    """Trainable spike feedback with window-local membrane and spike states."""
+
+    def __init__(self, in_features: int, hidden_size: int, **lif_kwargs):
+        super().__init__(**lif_kwargs)
+        if in_features < 1 or hidden_size < 1:
+            raise ValueError("RecurrentLIF dimensions must be positive.")
+        self.input_proj = nn.Linear(in_features, hidden_size)
+        self.recurrent = nn.Linear(hidden_size, hidden_size, bias=False)
+        nn.init.orthogonal_(self.recurrent.weight, gain=0.5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 3 or x.shape[1] != self.input_proj.in_features or x.shape[2] == 0:
+            raise ValueError("RecurrentLIF expects nonempty (B, in_features, T) input.")
+        current = self.input_proj(x.transpose(1, 2)).transpose(1, 2)
+        membrane = torch.zeros_like(current[:, :, 0])
+        previous = torch.zeros_like(membrane)
+        spikes = []
+        for t in range(current.shape[2]):
+            membrane = self.tau * membrane + current[:, :, t] + self.recurrent(previous)
+            spike = self._spike(membrane - self.thresh)
+            membrane = membrane - spike * self.thresh if self.soft_reset else membrane * (1.0 - spike)
+            spikes.append(spike)
+            previous = spike
+        return torch.stack(spikes, dim=2)
+
+
 def _as_triple(value: TripleLike, name: str) -> Tuple[int, int, int]:
     if isinstance(value, (list, tuple)):
         if len(value) != 3:
@@ -144,7 +171,7 @@ def _to_channels_first_time(x: torch.Tensor, valid_channels: Sequence[int]) -> t
 
 
 class SpikingLinearBlock(nn.Module):
-    """Linear block applied at every time step, followed by LIF dynamics."""
+    """Linear block applied at every time step, followed by LIF or ReLU."""
 
     def __init__(
         self,
@@ -153,6 +180,7 @@ class SpikingLinearBlock(nn.Module):
         p_drop: float = 0.0,
         bias: bool = True,
         use_bn: bool = True,
+        activation: str = "lif",
         **lif_kwargs,
     ):
         super().__init__()
@@ -162,7 +190,7 @@ class SpikingLinearBlock(nn.Module):
             self.fc = nn.Linear(in_features, out_features, bias=bias)
 
         self.bn = nn.BatchNorm1d(out_features) if bool(use_bn) else nn.Identity()
-        self.lif = LIFSpike(**lif_kwargs)
+        self.lif = nn.ReLU() if activation == "relu" else LIFSpike(**lif_kwargs)
         self.drop = nn.Dropout(float(p_drop)) if float(p_drop) > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -178,7 +206,7 @@ class SpikingLinearBlock(nn.Module):
 
 
 class ConvLIFMaxPoolBlock(nn.Module):
-    """Conv1d -> optional BN -> LIF -> MaxPool1d -> optional Dropout."""
+    """Conv1d -> optional BN -> LIF or ReLU -> MaxPool1d -> optional Dropout."""
 
     def __init__(
         self,
@@ -193,6 +221,7 @@ class ConvLIFMaxPoolBlock(nn.Module):
         p_drop: float = 0.0,
         bias: bool = False,
         use_bn: bool = True,
+        activation: str = "lif",
         **lif_kwargs,
     ):
         super().__init__()
@@ -205,7 +234,7 @@ class ConvLIFMaxPoolBlock(nn.Module):
             bias=bool(bias),
         )
         self.bn = nn.BatchNorm1d(int(out_channels)) if bool(use_bn) else nn.Identity()
-        self.lif = LIFSpike(**lif_kwargs)
+        self.lif = nn.ReLU() if activation == "relu" else LIFSpike(**lif_kwargs)
         self.pool = nn.MaxPool1d(
             kernel_size=int(pool_kernel_size),
             stride=int(pool_stride),

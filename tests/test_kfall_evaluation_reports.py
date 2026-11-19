@@ -31,7 +31,7 @@ class KFallEvaluationReportTests(unittest.TestCase):
             for index, subject in enumerate(self.split["subject"])
         ]}
 
-    def report(self, indices=(1, 2, 4, 3), probabilities=None, summary=None):
+    def report(self, indices=(1, 2, 4, 3), probabilities=None, summary=None, *, subject_matrices=False):
         indices = np.asarray(indices, dtype=np.int64)
         if probabilities is None:
             probabilities = [[0.8, 0.1, 0.1], [0.6, 0.3, 0.1],
@@ -41,7 +41,24 @@ class KFallEvaluationReportTests(unittest.TestCase):
             probabilities=np.asarray(probabilities), window_indices=indices,
             split=self.split, metadata=self.metadata,
             summary=summary or {"checkpoint": "best_model.pt", "best_epoch": 3, "loss": 0.5},
+            subject_matrices=subject_matrices,
         )
+
+    def test_subject_matrices_partition_predictions_and_keep_class_order(self):
+        metrics = self.report(subject_matrices=True)
+        folder = self.destination / "by_subject"
+        counts = {subject: np.load(folder / subject / "confusion_matrix.npy")
+                  for subject in ("SA07", "SA21", "SA38")}
+        np.testing.assert_array_equal(sum(counts.values()), np.load(self.destination / "confusion_matrix.npy"))
+        np.testing.assert_array_equal(counts["SA21"], [[0, 0, 0], [1, 0, 0], [0, 0, 1]])
+        np.testing.assert_array_equal(np.load(folder / "SA21" / "confusion_matrix_norm.npy"), counts["SA21"])
+        self.assertEqual((folder / "SA21" / "confusion_matrix.png").read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        with Path(metrics["artifacts"]["by_subject/summary.csv"]).open(newline="") as stream:
+            rows = {row["subject"]: row for row in csv.DictReader(stream)}
+        self.assertEqual(set(rows), set(counts))
+        self.assertEqual(rows["SA21"]["n"], "2")
+        self.assertEqual(rows["SA21"]["accuracy"], "0.5")
+        self.assertEqual(rows["SA21"]["fall_recall"], "")
 
     def test_outputs_metrics_predictions_and_actual_cache_indices(self):
         metrics = self.report()

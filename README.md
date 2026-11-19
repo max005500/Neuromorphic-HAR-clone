@@ -102,6 +102,20 @@ old runs: use a separate `--cache-name`/`--cache-dir` to preserve them.
 
 The default thresholds `0.1 0.1 0.1 10 10 10` are starting values in KFall's physical units, **not optimized KFall parameters**. Do not reuse SisFall thresholds, which operate on raw sensor counts. Tune thresholds and model choices using training/validation subjects and reserve test subjects for final evaluation. This implementation does not reproduce the paper's reported accuracy or energy savings on KFall.
 
+### PyQt6 manual annotation editor
+
+The KFall labelling GUI (UCI HAR activities, X/Y/Z accelerometer/gyroscope
+plots and draggable time windows) lives in [`kfall_labeler/`](kfall_labeler/README.md):
+
+```bash
+python -m pip install -r kfall_labeler/requirements.txt
+python kfall_labeler/label_kfall_manual.py
+```
+
+It writes `annotations/kfall_manual_labels.json`, which training uses
+automatically. See [`kfall_labeler/dataset/README.md`](kfall_labeler/dataset/README.md)
+for downloading KFall into the labeller's dataset folder.
+
 ## SisFall
 
 Download:
@@ -378,6 +392,73 @@ python train_kfall.py --no-offset --raw-win 206 --out-win 2060 --stride 103 \
 
 ## Evaluate the best KFall checkpoint
 
+### KFall compact CNN/SCN and recurrent comparison
+
+[Li et al. (2023), §3.2](https://doi.org/10.3389/fnins.2023.1233037) compare a
+three-block CNN with a deeper Conv-LSTM and their LIF counterparts. The KFall
+experiment below adapts that idea: either a unidirectional GRU or a recurrent
+LIF layer processes the sequence after the second pool and **before** temporal
+averaging. The offset branch and dense classifier are retained; the GRU itself
+is not spiking. This is not a reproduction of the paper's accuracy or energy
+results.
+
+| Variant | Backbone | Parameters with four classes and default offset |
+|---|---|---:|
+| `cnn` | ReLU, 3 blocks (`32,64,64`) | 111,276 |
+| `scn` | LIF, same 3 blocks | 111,276 |
+| `compact` | LIF, 2 blocks (`8,8`), kernels `8,5` | 1,260 |
+| `compact_gru` | Same 2 LIF blocks + GRU(4) | 1,412 |
+| `compact_srnn` | Same 2 LIF blocks + recurrent LIF(4) | 1,296 |
+
+The recurrent LIF layer adds learned connections between neurons, beyond the
+membrane memory already present in the ordinary SCN:
+`u[t] = tau*v[t-1] + W_in*x[t] + b + W_rec*s[t-1]`.
+It emits binary spikes and uses the existing triangular surrogate gradient
+and soft/hard reset rule. Both states start at zero for every window/forward
+call: they never carry information across subjects or batches. Unlike a
+spiking GRU/LSTM, it has no gates, reducing parameter overhead. Membrane
+potentials, weights and rate readouts remain floating-point.
+
+Use the same cache and encoder settings for all five variants. Example for the
+1.20 s cache: set `THETA` to the six thresholds saved in the original run's
+`config.json`, and use the exact same annotations, exclusions, split, seed,
+dead zone and post-impact settings (pass overrides if they differ from defaults).
+The runner sets the architecture and single dense head for each trial; all
+other training options are shared.
+
+```bash
+# Example: reuse the w120 run's six thresholds, not the current defaults.
+read -r -a THETA <<< "$(python -c 'import json,sys; print(*json.load(open(sys.argv[1]))["theta"])' \
+  runs/kfall_ventanas/kfall_w120_20261117_123134/config.json)"
+python run_kfall_architectures.py --output-dir runs/kfall_arch_w120 -- \
+  --gpu 0 --amp --epochs 60 --batch-size 32 --workers 4 \
+  --cache-dir data/kfall_cache_ventanas --cache-name w120 \
+  --raw-win 120 --out-win 1200 --stride 60 --theta "${THETA[@]}"
+```
+
+`summary.csv` compares parameters and validation results at the best checkpoint
+of each model. To report the five fixed variants on their original held-out
+test subjects, pass `--evaluate-test` **before** `--` when launching the
+comparison, or run `evaluate_kfall.py` on each saved run afterwards. This adds
+global and per-subject confusion matrices. Choose widths and hyperparameters
+using validation only; repeat the comparison with the other window sizes
+separately. For standalone training, use `--conv-depth`, `--gru-hidden`,
+`--srnn-hidden` and `--activation`. To train the spiking recurrent variant, add
+these settings to your existing `train_kfall.py` command, keeping the encoder
+and subject split unchanged:
+
+```bash
+--conv-depth 2 --conv-ch 8 8 8 --kernels 8 5 8 \
+--activation lif --gru-hidden 0 --srnn-hidden 4
+```
+
+GRU and recurrent LIF cannot be enabled together. The recurrent LIF also
+supports `--spiking-heads` for the offset-fused classifier; this changes the
+parameter count and rate-based readout, so the default comparison retains the
+same dense classifier for all five variants. The SCN energy profiler does not
+support ReLU, GRU or recurrent LIF models; fewer weights alone do not establish
+lower runtime or energy consumption.
+
 ### Train-only theta calibration and validation-only SCN ablations
 
 The original SCN can be optimized in two separate stages:
@@ -463,6 +544,11 @@ Results are saved under the run's `metrics/test_best/`:
   remaining before impact.
 - NPY files with targets, predictions, probabilities, window indices, and
   confusion matrices.
+- `by_subject/summary.csv`: window count, accuracy, balanced accuracy, F1
+  and fall metrics for each held-out subject. Undefined values are left blank.
+- `by_subject/SAxx/confusion_matrix.png` and corresponding NPY files: one
+  matrix per held-out subject, with counts and normalization by true class.
+  These reuse the full-test predictions without additional inference.
 
 Restrict inspection to a held-out subject or a specific test-window index:
 

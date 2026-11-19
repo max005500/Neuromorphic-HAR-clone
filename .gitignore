@@ -17,6 +17,10 @@
 /data/UCI HAR Dataset/*
 !/data/UCI HAR Dataset/README.md
 
+# Dataset local del etiquetador KFall: solo se versiona su README.
+/kfall_labeler/dataset/*
+!/kfall_labeler/dataset/README.md
+
 # Entrenamiento, optimizacion y reportes generados.
 /runs/
 /results/

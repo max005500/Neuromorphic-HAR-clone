@@ -61,6 +61,10 @@ class SCNEnergyProfiler:
     """Forward-hook profiler for SCN inference energy."""
 
     def __init__(self, model: nn.Module, include_data_movement: bool = True, offset_as_dense_mac: bool = True) -> None:
+        if (getattr(model, "temporal_gru", None) is not None
+                or getattr(model, "temporal_srnn", None) is not None
+                or getattr(model, "activation", "lif") != "lif"):
+            raise ValueError("The SCN energy profiler does not account for GRU, recurrent LIF, or ReLU models.")
         self.model = model
         self.include_data_movement = bool(include_data_movement)
         self.offset_as_dense_mac = bool(offset_as_dense_mac)

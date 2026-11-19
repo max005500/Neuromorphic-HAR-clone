@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,11 @@ def _save_json(path: Path, value: Any) -> None:
 
 def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
+
+
+def _normalize_confusion(counts: np.ndarray) -> np.ndarray:
+    support = counts.sum(axis=1, keepdims=True)
+    return np.divide(counts, support, out=np.zeros_like(counts, dtype=float), where=support != 0)
 
 
 def _fall_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, Any]:
@@ -87,6 +93,7 @@ def save_evaluation_reports(
     output_dir: str | Path, *, y_true: np.ndarray, probabilities: np.ndarray,
     window_indices: np.ndarray, split: dict[str, np.ndarray],
     metadata: dict[str, Any], summary: dict[str, Any],
+    subject_matrices: bool = False,
 ) -> dict[str, Any]:
     """Save full reports, preserving the original test-cache index for every row.
 
@@ -125,6 +132,9 @@ def save_evaluation_reports(
     indices = indices.astype(np.int64, copy=False)
     predicted = probabilities.argmax(axis=1).astype(np.int64)
     subjects = np.asarray(split["subject"])[indices]
+    subject_ids = sorted(np.unique(subjects).tolist())
+    if subject_matrices and any(not re.fullmatch(r"SA[0-9]{2}", str(subject)) for subject in subject_ids):
+        raise ValueError("Per-subject matrices require KFall subject IDs such as SA07.")
     records = metadata["recordings"]
     csv_rows = []
     for position, index in enumerate(indices):
@@ -158,10 +168,11 @@ def save_evaluation_reports(
     report = classification_report(truth, predicted, output_dict=True, **report_arguments)
     counts = confusion_matrix(truth, predicted, labels=list(range(n_classes)))
     support = counts.sum(axis=1)
-    normalized = np.divide(counts, support[:, None], out=np.zeros_like(counts, dtype=float), where=support[:, None] != 0)
+    normalized = _normalize_confusion(counts)
     recall = np.divide(np.diag(counts), support, out=np.zeros(n_classes, dtype=float), where=support != 0)
     per_subject = {}
-    for subject in sorted(np.unique(subjects).tolist()):
+    matrices = {}
+    for subject in subject_ids:
         selected = subjects == subject
         subject_report = classification_report(truth[selected], predicted[selected],
                                                output_dict=True, **report_arguments)
@@ -177,6 +188,8 @@ def save_evaluation_reports(
             "class_counts": {name: int(np.sum(truth[selected] == label)) for label, name in enumerate(class_names)},
             "fall_window_metrics": _fall_metrics(truth[selected], predicted[selected]),
         }
+        if subject_matrices:
+            matrices[str(subject)] = subject_counts
     metrics = {
         **summary, "n": len(truth), "n_samples": len(truth),
         "accuracy": float(np.mean(truth == predicted)),
@@ -208,6 +221,27 @@ def save_evaluation_reports(
         classification_report(truth, predicted, digits=4, **report_arguments), encoding="utf-8")
     _confusion_plot(output_dir / "confusion_matrix.png", counts, normalized, class_names,
                     str(summary.get("dataset", "KFall")))
+    if matrices:
+        by_subject = output_dir / "by_subject"
+        summary_path = by_subject / "summary.csv"
+        for subject, subject_counts in matrices.items():
+            folder = by_subject / subject
+            folder.mkdir(parents=True, exist_ok=True)
+            norm = _normalize_confusion(subject_counts)
+            np.save(folder / "confusion_matrix.npy", subject_counts, allow_pickle=False)
+            np.save(folder / "confusion_matrix_norm.npy", norm, allow_pickle=False)
+            _confusion_plot(folder / "confusion_matrix.png", subject_counts, norm, class_names,
+                            f"KFall · {subject}")
+        fields = ("n", "accuracy", "balanced_accuracy", "macro_f1", "weighted_f1")
+        fall_fields = ("precision", "recall", "f1", "specificity")
+        with summary_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(["subject", *fields, *(f"fall_{key}" for key in fall_fields)])
+            for subject, values in per_subject.items():
+                fall = values["fall_window_metrics"]
+                writer.writerow(_strict_values([subject, *(values[key] for key in fields),
+                                                *(fall[key] for key in fall_fields)]))
+        metrics["artifacts"]["by_subject/summary.csv"] = str(summary_path)
     metrics = _strict_values(metrics)
     _save_json(output_dir / "metrics.json", metrics)
     return metrics

@@ -18,6 +18,7 @@ from train_kfall import build_data, build_model, get_args, main
 from train_sisfall import run_epoch_dual
 from train.utils import make_grad_scaler
 from evaluate_kfall import evaluate_run
+from run_kfall_architectures import main as compare_architectures
 from visualization.kfall_data import KFallWindowStore
 
 
@@ -54,6 +55,46 @@ def fixture_args(root: Path) -> list[str]:
 
 
 class KFallTrainingTests(unittest.TestCase):
+    def test_architecture_comparison_reloads_compact_gru_for_held_out_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_fixture(root)
+            destination = root / "comparison"
+            with contextlib.redirect_stdout(io.StringIO()):
+                compare_architectures(["--output-dir", str(destination), "--evaluate-test", "--",
+                                       *fixture_args(root), "--conv-ch", "32", "64", "64"])
+            with (destination / "summary.csv").open(newline="") as stream:
+                report = {row["variant"]: row for row in csv.DictReader(stream)}
+            self.assertEqual(set(report), {"cnn", "scn", "compact", "compact_gru", "compact_srnn"})
+            self.assertLess(int(report["compact"]["parameters"]), int(report["compact_gru"]["parameters"]))
+            self.assertLess(int(report["compact_gru"]["parameters"]), int(report["scn"]["parameters"]))
+            run = Path(report["compact_gru"]["run_dir"])
+            checkpoint = torch.load(run / "checkpoints" / "best_model.pt", map_location="cpu", weights_only=True)
+            self.assertIn("temporal_gru.weight_hh_l0", checkpoint["model_state_dict"])
+            self.assertFalse(any(key.startswith("conv_block3.") for key in checkpoint["model_state_dict"]))
+            metrics = json.loads((run / "metrics" / "test_best" / "metrics.json").read_text())
+            self.assertEqual(metrics["selection"], "full_test")
+            self.assertEqual(metrics["test_subjects"], metrics["all_test_subjects"])
+            self.assertTrue(np.isfinite(float(report["compact_gru"]["test_macro_f1"])))
+            srnn_run = Path(report["compact_srnn"]["run_dir"])
+            srnn_checkpoint = torch.load(srnn_run / "checkpoints" / "best_model.pt",
+                                         map_location="cpu", weights_only=True)
+            self.assertIn("temporal_srnn.recurrent.weight", srnn_checkpoint["model_state_dict"])
+            self.assertLess(int(report["compact_srnn"]["parameters"]), int(report["compact_gru"]["parameters"]))
+            self.assertTrue(np.isfinite(float(report["compact_srnn"]["test_macro_f1"])))
+
+    def test_recurrent_lif_spiking_classifier_and_invalid_combinations(self) -> None:
+        cfg = get_args(["--conv-depth", "2", "--conv-ch", "8", "8", "8",
+                        "--kernels", "8", "5", "8", "--srnn-hidden", "4", "--spiking-heads"])
+        model = build_model(cfg, torch.device("cpu")).eval()
+        logits, features = model(torch.zeros(2, 128, 6, 2), offset=torch.ones(2, 6))
+        self.assertEqual(tuple(logits.shape), (2, 4))
+        self.assertEqual(tuple(features.shape), (2, 12))
+        for args in (["--srnn-hidden", "-1"], ["--srnn-hidden", "4", "--gru-hidden", "4"],
+                     ["--srnn-hidden", "4", "--activation", "relu"]):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                get_args(args)
+
     def test_manual_normal_labels_and_postimpact_train_evaluate_and_view(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -127,6 +127,14 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--thresh", type=float, default=0.5)
     p.add_argument("--hard-reset", action="store_true")
     p.add_argument("--conv-ch", type=int, nargs=3, default=[32, 64, 64])
+    p.add_argument("--conv-depth", type=int, choices=(2, 3), default=3,
+                   help="Number of convolutional blocks; depth 2 ignores the third block settings.")
+    p.add_argument("--gru-hidden", type=int, default=0,
+                   help="GRU width after the convolutional blocks (0 disables recurrence).")
+    p.add_argument("--srnn-hidden", type=int, default=0,
+                   help="Recurrent LIF width after pooling (0 disables it); incompatible with GRU/ReLU.")
+    p.add_argument("--activation", choices=("lif", "relu"), default="lif",
+                   help="LIF for SCN or ReLU for the conventional CNN baseline.")
     p.add_argument("--kernels", type=int, nargs=3, default=[32, 32, 8])
     p.add_argument("--strides", type=int, nargs=3, default=[4, 2, 1])
     p.add_argument("--pool-kernels", type=int, nargs=3, default=[2, 2, 2])
@@ -142,6 +150,10 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     cfg = p.parse_args(argv)
     if cfg.epochs < 1 or cfg.batch_size < 1 or cfg.workers < 0:
         p.error("epochs and batch-size must be positive; workers must be nonnegative.")
+    if cfg.gru_hidden < 0 or (cfg.spiking_heads and (cfg.gru_hidden or cfg.activation == "relu")):
+        p.error("gru-hidden must be nonnegative; GRU and ReLU require --no-spiking-heads.")
+    if cfg.srnn_hidden < 0 or (cfg.srnn_hidden and (cfg.gru_hidden or cfg.activation != "lif")):
+        p.error("srnn-hidden must be nonnegative and requires LIF activation without a GRU.")
     cfg.n_ch = 6
     cfg.dataset = "kfall"
     cfg.n_classes = 4 if cfg.post_impact_seconds > 0 else 3
@@ -204,6 +216,8 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
 
 def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
     kwargs = scn_model_kwargs(cfg)
+    kwargs.update(conv_depth=getattr(cfg, "conv_depth", 3), gru_hidden=getattr(cfg, "gru_hidden", 0),
+                  activation=getattr(cfg, "activation", "lif"), srnn_hidden=getattr(cfg, "srnn_hidden", 0))
     if cfg.head_mode == "single":
         return SingleHeadSCN(n_classes=cfg.n_classes, **kwargs).to(dev)
     model = DualHeadSCN(n_classes_head1=cfg.n_classes, **kwargs).to(dev)
@@ -213,7 +227,7 @@ def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
     return model
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> Path | None:
     cfg = get_args(argv)
     set_seed(cfg.seed)
     dev = get_device(cfg.gpu)
@@ -226,7 +240,7 @@ def main(argv: list[str] | None = None) -> None:
     if cfg.preprocess_only:
         cache_path = Path(cfg.cache_dir) / f"kfall_event_loader_{cfg.cache_name}"
         print(f"[done] cache={cache_path} | metadata={cache_path / 'metadata.json'}")
-        return
+        return None
 
     requested_run = cfg.run
     run_stem = requested_run if "kfall" in requested_run.lower() else f"{requested_run}_kfall"
@@ -289,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
             "test_evaluated": False, "parameters": total,
         })
         print(f"[done] validation-only saved_run={run_dir}")
-        return
+        return run_dir
     checkpoint = torch.load(ckpt_path, map_location=dev, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     test_metrics = epoch_runner(data["loaders"]["test"], collect_predictions=True)
@@ -314,6 +328,7 @@ def main(argv: list[str] | None = None) -> None:
     save_json(metrics_dir / "test_metrics.json", test_metrics)
     print(json.dumps(json_ready(test_metrics), indent=2, ensure_ascii=False))
     print(f"[done] saved_run={run_dir}")
+    return run_dir
 
 
 if __name__ == "__main__":

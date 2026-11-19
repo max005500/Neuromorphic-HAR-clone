@@ -20,6 +20,7 @@ import torch.nn as nn
 from models.utils import (
     ConvLIFMaxPoolBlock,
     EventInputMixin,
+    RecurrentLIF,
     SpikingLinearBlock,
     TripleLike,
     _as_triple,
@@ -64,6 +65,10 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         gamma: float = 1.0,
         smooth: bool = False,
         soft_reset: bool = True,
+        conv_depth: int = 3,
+        gru_hidden: int = 0,
+        activation: str = "lif",
+        srnn_hidden: int = 0,
     ):
         super().__init__()
 
@@ -77,6 +82,14 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         self.use_bn = bool(use_bn)
         self.spiking_heads = bool(spiking_heads)
         self.head_rate_scale = float(head_rate_scale)
+        if conv_depth not in (2, 3) or gru_hidden < 0 or activation not in {"lif", "relu"}:
+            raise ValueError("Expected conv_depth 2 or 3, nonnegative gru_hidden, and lif or relu activation.")
+        if spiking_heads and (gru_hidden or activation == "relu"):
+            raise ValueError("GRU and ReLU variants require a dense classifier.")
+        if srnn_hidden < 0 or (srnn_hidden and (gru_hidden or activation != "lif")):
+            raise ValueError("srnn_hidden must be nonnegative and requires LIF activation without a GRU.")
+        self.conv_depth = conv_depth
+        self.activation = activation
 
         self.offset_dim = int(self.n_channels if offset_dim is None else offset_dim)
         self.offset_hidden = int(offset_hidden)
@@ -103,6 +116,14 @@ class DualHeadSCN(nn.Module, EventInputMixin):
             soft_reset=bool(soft_reset),
         )
         self._build_backbone(float(p_drop), bool(bias), lif_kwargs)
+        self.temporal_gru = None
+        if gru_hidden:
+            self.temporal_gru = nn.GRU(self.out_dim, gru_hidden, batch_first=True)
+            self.out_dim = gru_hidden
+        self.temporal_srnn = None
+        if srnn_hidden:
+            self.temporal_srnn = RecurrentLIF(self.out_dim, srnn_hidden, **lif_kwargs)
+            self.out_dim = srnn_hidden
         if self.use_offset:
             self._build_offset_branch(float(offset_drop), lif_kwargs)
         else:
@@ -138,11 +159,12 @@ class DualHeadSCN(nn.Module, EventInputMixin):
     def _build_backbone(self, p_drop: float, bias: bool, lif_kwargs: Dict[str, Any]) -> None:
         input_channels = self.n_channels if self.merge_polarities else (2 * self.n_channels)
         c1, c2, c3 = self.conv_channels
-        self.out_dim = int(c3)
+        self.out_dim = c3 if self.conv_depth == 3 else c2
 
         self.conv_block1 = self._make_conv_block(input_channels, c1, 0, p_drop, bias, lif_kwargs)
         self.conv_block2 = self._make_conv_block(c1, c2, 1, 0.0, bias, lif_kwargs)
-        self.conv_block3 = self._make_conv_block(c2, c3, 2, 0.0, bias, lif_kwargs)
+        if self.conv_depth == 3:
+            self.conv_block3 = self._make_conv_block(c2, c3, 2, 0.0, bias, lif_kwargs)
 
     def _make_conv_block(
         self,
@@ -165,6 +187,7 @@ class DualHeadSCN(nn.Module, EventInputMixin):
             p_drop=float(p_drop),
             bias=bool(bias),
             use_bn=self.use_bn,
+            activation=self.activation,
             **lif_kwargs,
         )
 
@@ -175,6 +198,7 @@ class DualHeadSCN(nn.Module, EventInputMixin):
             p_drop=float(offset_drop),
             bias=True,
             use_bn=self.use_bn,
+            activation=self.activation,
             **lif_kwargs,
         )
         self.fused_dim = int(self.out_dim + self.offset_hidden)
@@ -205,11 +229,12 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         self.head1 = nn.Linear(self.fused_dim, self.n_classes_head1, bias=True)
         self.head2 = nn.Linear(self.fused_dim, 1, bias=True)
 
-    def _forward_event_spikes(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_event_features(self, x: torch.Tensor) -> torch.Tensor:
         h = self._event_to_current(x)
         h = self.conv_block1(h)
         h = self.conv_block2(h)
-        h = self.conv_block3(h)
+        if self.conv_depth == 3:
+            h = self.conv_block3(h)
         return h
 
     def _check_offset(
@@ -284,7 +309,12 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         x: torch.Tensor,
         offset: Optional[torch.Tensor],
     ) -> tuple[Optional[torch.Tensor], torch.Tensor]:
-        h_evt = self._forward_event_spikes(x)
+        h_evt = self._forward_event_features(x)
+        if self.temporal_gru is not None:
+            sequence, _ = self.temporal_gru(h_evt.transpose(1, 2).contiguous())
+            h_evt = sequence.transpose(1, 2)
+        if self.temporal_srnn is not None:
+            h_evt = self.temporal_srnn(h_evt)
         rep_evt = h_evt.mean(dim=2)
 
         if not self.use_offset:
