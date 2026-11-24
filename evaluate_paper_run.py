@@ -8,13 +8,38 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import re
+import time
 
 import numpy as np
 import torch
 
 from energy.measure_consumption import SCNEnergyProfiler
 from evaluation.paper_metrics import classification_metrics
-from train.utils import count_parameters, get_device, save_classification_outputs, save_json
+from train.utils import count_parameters, format_seconds, get_device, save_classification_outputs, save_json
+
+
+def _progress_batches(loader, *, label, every=5.0, enabled=True):
+    if not enabled:
+        yield from loader
+        return
+    total = len(loader)
+    samples_total = len(loader.dataset)
+    started = last_report = time.perf_counter()
+    processed = 0
+    print(f"{label} batches=0/{total} samples=0/{samples_total} ETA=pending", flush=True)
+    for index, batch in enumerate(loader, 1):
+        yield batch
+        processed += len(batch["x"])
+        now = time.perf_counter()
+        if index == 1 or index == total or now - last_report >= every:
+            elapsed = now - started
+            eta = elapsed * (total - index) / index
+            rate = processed / elapsed if elapsed > 0 else 0.0
+            print(
+                f"{label} batches={index}/{total} samples={processed}/{samples_total} "
+                f"progress={100 * index / total:.1f}% rate={rate:.1f}samples/s "
+                f"elapsed={format_seconds(elapsed)} ETA={format_seconds(eta)}", flush=True)
+            last_report = now
 
 
 def save_confusion_figure(path, truth, prediction, names):
@@ -30,19 +55,33 @@ def save_confusion_figure(path, truth, prediction, names):
     figure.savefig(path, dpi=150)
 
 
-def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None):
+def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None,
+             progress=True, progress_every=5.0):
+    if not np.isfinite(progress_every) or progress_every <= 0:
+        raise ValueError("progress_every must be positive and finite.")
     if perturbation is not None and (not tag or re.fullmatch(r"[a-zA-Z0-9_-]+", tag) is None):
         raise ValueError("Perturbation requires a unique alphanumeric/underscore/hyphen tag.")
+    started = time.perf_counter()
+    label = f"[paper:{split}]"
+
+    def log(message):
+        if progress:
+            print(f"{label} {message} elapsed={format_seconds(time.perf_counter() - started)}", flush=True)
+
+    log(f"stage=initializing run={run} dataset={dataset}")
     module = importlib.import_module(f"train_{dataset}")
     cfg = SimpleNamespace(**json.loads((run / "config.json").read_text()))
     cfg.input_mode = getattr(cfg, "input_mode", "sigma_delta")
     device = get_device(gpu)
+    log(f"stage=loading_data device={device} batch_size={cfg.batch_size} "
+        f"raw_win={cfg.raw_win} out_win={cfg.out_win} input_mode={cfg.input_mode}")
     data_cfg = SimpleNamespace(**vars(cfg))
     if perturbation is not None:
         data_cfg.input_mode = "raw"
         data_cfg.out_win = cfg.raw_win
         data_cfg.cache_name += "_paper_native"
     data = module.build_data(data_cfg, device)
+    log(f"stage=data_ready samples={len(data['loaders'][split].dataset)} batches={len(data['loaders'][split])}")
     if perturbation is not None:
         from evaluation.paper_robustness import PerturbedWindowDataset
         original_loader = data["loaders"][split]
@@ -54,6 +93,7 @@ def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None):
             PerturbedWindowDataset(original_loader.dataset, cfg, perturbation, frames=frames),
             batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.workers,
             pin_memory=device.type == "cuda")
+    log("stage=loading_checkpoint")
     checkpoint = torch.load(run / "checkpoints/best_model.pt", map_location=device, weights_only=False)
     model = module.build_model(cfg, device)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
@@ -67,11 +107,14 @@ def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None):
         kwargs = dict(class_weight=weights, collect_predictions=True)
         if dataset == "sisfall":
             kwargs["pos_weight_h2"] = data["pos_weight_h2"]
-        metrics = module.run_epoch(model, data["loaders"][split], device, cfg, **kwargs)
+        log("stage=inference_and_energy")
+        batches = _progress_batches(data["loaders"][split], label=label, every=progress_every, enabled=progress)
+        metrics = module.run_epoch(model, batches, device, cfg, **kwargs)
     finally:
         handle.remove()
         profiler.remove()
     energy, layers = profiler.summarize()
+    log("stage=saving_reports")
     destination = run / "metrics" / f"paper_{split}{'_' + tag if perturbation is not None else ''}"
     destination.mkdir(parents=True, exist_ok=True)
     if dataset == "sisfall" and cfg.head_mode == "dual":
@@ -133,6 +176,7 @@ def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None):
     if dataset == "kfall":
         rows = []
         for subject in np.unique(subjects):
+            log(f"stage=subject_report subject={subject}")
             mask = subjects == subject
             folder = destination / "by_subject" / str(subject)
             save_classification_outputs(folder, truth[mask], prediction[mask], range(len(names)), names)
@@ -171,6 +215,7 @@ def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None):
             ("manual_annotation_signature", "manual_annotation_missing_recordings", "fall_label_rule", "raw_data")}
     save_json(destination / "result.json", result)
     save_json(destination / "energy_layers.json", layers)
+    log(f"stage=done accuracy={accuracy} macro_f1={macro_f1} output={destination}")
     return result
 
 
@@ -183,11 +228,16 @@ def main():
     parser.add_argument("--perturbation", type=Path,
                         help="JSON kwargs for perturb_raw_signal, including units and native sample_rate_hz.")
     parser.add_argument("--tag", help="Separate output suffix, required with --perturbation.")
+    parser.add_argument("--progress-every", type=float, default=5.0,
+                        help="Seconds between batch progress updates (first/last always shown).")
+    parser.add_argument("--quiet-progress", action="store_true", help="Suppress stage and batch progress.")
     args = parser.parse_args()
     perturbation = json.loads(args.perturbation.read_text()) if args.perturbation else None
     result = evaluate(args.run_dir, dataset=args.dataset, split=args.split, gpu=args.gpu,
-                      perturbation=perturbation, tag=args.tag)
-    print(f"[paper:{args.split}] macro_f1={result['macro_f1']} | accuracy={result['accuracy']}")
+                      perturbation=perturbation, tag=args.tag,
+                      progress=not args.quiet_progress, progress_every=args.progress_every)
+    if args.quiet_progress:
+        print(f"[paper:{args.split}] macro_f1={result['macro_f1']} | accuracy={result['accuracy']}", flush=True)
 
 
 if __name__ == "__main__":

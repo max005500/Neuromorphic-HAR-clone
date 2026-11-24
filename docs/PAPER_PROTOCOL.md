@@ -35,8 +35,11 @@ python run_paper_experiments.py \
   --execute --resume
 ```
 
-Se ejecutan calibraciones y entrenamientos secuenciales; los logs quedan en
-`command_NNN.log`. `completed_commands.json` permite omitir comandos terminados
+Se ejecutan calibraciones y entrenamientos secuenciales. El runner muestra el
+comando/modelo actual, su posicion en la matriz y la salida del proceso en vivo,
+incluidas las epocas; tambien conserva todo en `command_NNN.log`.
+`--log-only` vuelve a ocultar la salida del hijo de la terminal, no los logs.
+`completed_commands.json` permite omitir comandos terminados
 al repetir `--execute --resume` con los mismos argumentos. Si un entrenamiento
 interrumpido dejo una carpeta parcial, archivala antes de reintentar: el runner
 no borra ni considera completo un checkpoint parcial.
@@ -187,6 +190,15 @@ accuracy, macro-F1, matriz de confusion de cuatro/seis clases, PNG de confusion,
 reportes por clase, predicciones NPY, `by_subject.json`, parametros,
 operaciones MAC/SOP, tasas de disparo y energia PE normalizada. Las redes LIF
 tambien producen `firing_rates.png`.
+Por defecto muestra las etapas (datos/cache, checkpoint, inferencia, reportes),
+el dispositivo real CPU/CUDA y avance por lotes con muestras, velocidad y ETA.
+Las actualizaciones aparecen cada cinco segundos y siempre tras el primer y
+ultimo lote: `--progress-every 1` cambia el intervalo y `--quiet-progress` las
+oculta. El API `evaluate(...)` tambien muestra este avance, por lo que funciona
+con el bloque Python de evaluacion masiva; `progress=False` lo desactiva.
+La ETA empieza tras completar el primer lote y no incluye carga ni figuras.
+Ventanas largas LIF pueden tardar bastante por lote, especialmente en CPU.
+Cambiar los archivos no modifica un proceso Python que ya esta ejecutandose.
 En KFall se agregan `by_subject/SAxx/confusion_matrix.png`, reportes por sujeto
 y `by_subject/summary.csv`. Las matrices y macro-F1 siempre mantienen las cuatro
 clases aunque un sujeto no tenga muestras de alguna clase.

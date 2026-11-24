@@ -10,6 +10,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -23,6 +24,22 @@ VARIANTS = {
 }
 PROFILE_KEYS = {"conv_ch", "kernels", "strides", "pool_kernels", "pool_strides", "pool_paddings",
                 "tau", "thresh", "p_drop", "offset_hidden", "hard_reset"}
+
+
+def _run_logged_command(command, log_path, *, log_only=False):
+    unbuffered = [command[0], "-u", *command[1:]]
+    with log_path.open("w") as stream:
+        with subprocess.Popen(unbuffered, cwd=ROOT, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stream.write(line)
+                stream.flush()
+                if not log_only:
+                    print(line, end="", flush=True)
+            returncode = process.wait()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def cli_options(settings):
@@ -156,6 +173,7 @@ def main(argv=None):
     parser.add_argument("--compare-single-head", action="store_true")
     parser.add_argument("--omega-sweep", action="store_true")
     parser.add_argument("--execute", action="store_true", help="Actually calibrate/train; otherwise save manifest only.")
+    parser.add_argument("--log-only", action="store_true", help="Keep child output only in logs instead of streaming it.")
     parser.add_argument("--resume", action="store_true",
                         help="Execute an identical saved manifest, skipping successfully journaled commands.")
     parser.add_argument("--evaluate-test", action="store_true", help="Evaluate frozen runs after all training is complete.")
@@ -181,6 +199,7 @@ def main(argv=None):
     completed = set(json.loads(journal_path.read_text())) if journal_path.exists() else set()
     if not completed.issubset(set(range(len(manifest["commands"])))):
         raise ValueError("Invalid completed-command journal.")
+    print(f"[paper:commands] completed={len(completed)} remaining={len(manifest['commands']) - len(completed)}", flush=True)
     for index, command in enumerate(manifest["commands"]):
         if index in completed:
             continue
@@ -189,9 +208,13 @@ def main(argv=None):
             if trial_dir.exists() and any(trial_dir.iterdir()):
                 raise RuntimeError(f"Unfinished training output exists at {trial_dir}; archive it before resuming.")
         log_path = args.output / f"command_{index:03d}.log"
+        detail_option = "--run" if "--run" in command else "--output"
+        detail = command[command.index(detail_option) + 1]
+        print(f"[paper:command {index + 1}/{len(manifest['commands'])}] "
+              f"{Path(command[1]).name} {detail} | log={log_path}", flush=True)
+        started = time.perf_counter()
         try:
-            with log_path.open("w") as stream:
-                subprocess.run(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT, check=True)
+            _run_logged_command(command, log_path, log_only=args.log_only)
         except subprocess.CalledProcessError as exc:
             tail = log_path.read_text()[-4000:]
             raise RuntimeError(f"Experiment command {index} failed; see {log_path}.\n{tail}") from exc
@@ -199,13 +222,17 @@ def main(argv=None):
         temporary = journal_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(sorted(completed)) + "\n")
         temporary.replace(journal_path)
+        print(f"[paper:command {index + 1}/{len(manifest['commands'])}] "
+              f"done elapsed={time.perf_counter() - started:.1f}s", flush=True)
     rows = []
-    for trial in manifest["trials"]:
+    for trial_index, trial in enumerate(manifest["trials"], 1):
         runs = list(Path(trial["trial_dir"]).glob("*/checkpoints/best_model.pt"))
         if len(runs) != 1:
             raise RuntimeError(f"Expected exactly one saved checkpoint for {trial['id']}.")
         run = runs[0].parents[1]
         for split in (("val", "test") if args.evaluate_test else ("val",)):
+            print(f"[paper:evaluate {trial_index}/{len(manifest['trials'])}] "
+                  f"{trial['id']} split={split} run={run}", flush=True)
             subprocess.run([*trial["evaluation_command"], "--run-dir", str(run), "--split", split], cwd=ROOT, check=True)
             result_path = run / "metrics" / f"paper_{split}" / "result.json"
             result = json.loads(result_path.read_text())
@@ -229,6 +256,7 @@ def main(argv=None):
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    print(f"[paper:done] results={args.output / 'results.csv'}", flush=True)
     return manifest
 
 
