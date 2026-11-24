@@ -38,18 +38,20 @@ from models.models import DualHeadSCN, SingleHeadSCN
 from preprocess.utils import named_class_counts
 from train_sisfall import run_epoch_dual
 from train_ucihar import run_epoch as run_epoch_single
+from train.paper_protocol import load_theta_config, verify_calibration_subjects, verify_publication_data
 
 
 class KFallTrainingDataset(Dataset):
-    """Read event windows on demand, retaining memory-mapped cache arrays."""
+    """Read native/event windows on demand, retaining memory-mapped arrays."""
 
     def __init__(self, split: dict[str, np.ndarray]) -> None:
         self.split = split
         n = len(split["y_h1"])
         if split["x_ev"].shape[0] != n or split["offset"].shape != (n, 6):
             raise ValueError("KFall event windows, offsets, and labels must align.")
-        if split["x_ev"].ndim != 4 or split["x_ev"].shape[2:] != (6, 2):
-            raise ValueError("KFall events must have shape (N, Te, 6, 2).")
+        x = split["x_ev"]
+        if not ((x.ndim == 4 and x.shape[2:] == (6, 2)) or (x.ndim == 3 and x.shape[2] == 6)):
+            raise ValueError("KFall requires events (N, Te, 6, 2) or raw (N, T, 6).")
         if not np.isin(split["y_h1"], list(CLASS_NAMES)).all():
             raise ValueError("KFall activity labels must be Fall=0, Dynamic=1, Static=2 or PostImpact=3.")
 
@@ -101,6 +103,9 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--theta", type=float, nargs=6, default=list(defaults.theta_sd), help="Initial encoder thresholds in g (first three) and deg/s (last three); tune using training subjects.")
     p.add_argument("--dead-zone", type=float, default=defaults.dead_zone)
     p.add_argument("--sd-init", choices=["x0", "zero"], default=defaults.sd_init)
+    p.add_argument("--input-mode", choices=("sigma_delta", "raw"), default="sigma_delta")
+    p.add_argument("--theta-file", type=Path, help="Train-only calibration from calibrate_paper_theta.py.")
+    p.add_argument("--publication-protocol", action="store_true")
 
     p.add_argument("--head-mode", choices=["single", "dual"], default="single", help="Activity single head, or dual architecture with the unannotated posture head disabled.")
     p.add_argument("--out-dir", default="runs")
@@ -180,6 +185,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         fall_policy=cfg.fall_policy,
         post_impact_seconds=cfg.post_impact_seconds,
         excluded_tasks=tuple(cfg.exclude_tasks),
+        input_mode=getattr(cfg, "input_mode", "sigma_delta"),
     )
     splits, metadata = load_or_build_kfall_event_splits(
         dataset_root=cfg.dataset_root,
@@ -194,6 +200,8 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
     )
     if any(len(split["y_h1"]) == 0 for split in splits.values()):
         raise ValueError("Each training, validation, and test split must contain windows.")
+    verify_calibration_subjects(cfg, metadata)
+    verify_publication_data(cfg, splits, metadata, "kfall")
     if cfg.cache_format == "pt":
         cache_root = Path(cfg.cache_dir) / f"kfall_event_loader_{cfg.cache_name}"
         datasets = {name: load_or_build_tensor_dataset(cache_root, name, split)
@@ -214,6 +222,17 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
     return {"splits": splits, "metadata": metadata, "loaders": loaders}
 
 
+def run_epoch(
+    model: torch.nn.Module, loader: Any, dev: torch.device, cfg: argparse.Namespace,
+    class_weight: torch.Tensor | None = None, collect_predictions: bool = False,
+) -> dict[str, Any]:
+    if cfg.head_mode == "dual":
+        return run_epoch_dual(model, loader, dev, cfg, pos_weight_h2=1.0,
+                              class_weight=class_weight, collect_predictions=collect_predictions)
+    return run_epoch_single(model, loader, dev, cfg, class_weight=class_weight,
+                            collect_predictions=collect_predictions)
+
+
 def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
     kwargs = scn_model_kwargs(cfg)
     kwargs.update(conv_depth=getattr(cfg, "conv_depth", 3), gru_hidden=getattr(cfg, "gru_hidden", 0),
@@ -229,6 +248,7 @@ def build_model(cfg: argparse.Namespace, dev: torch.device) -> torch.nn.Module:
 
 def main(argv: list[str] | None = None) -> Path | None:
     cfg = get_args(argv)
+    load_theta_config(cfg, "kfall")
     set_seed(cfg.seed)
     dev = get_device(cfg.gpu)
     print(f"[labels] manual={cfg.annotation_file or 'disabled (task grouping)'} | post_impact_seconds={cfg.post_impact_seconds}")

@@ -53,6 +53,8 @@ from loaders.utils import balanced_class_weights
 from models.losses import dual_head_losses, weighted_cross_entropy_loss
 from models.models import DualHeadSCN, SingleHeadSCN
 from preprocess.utils import named_class_counts
+from train.paper_protocol import add_paper_arguments, load_theta_config, verify_calibration_subjects, verify_publication_data
+from train.classification import update_confusion, confusion_metrics
 
 DEFAULT_THETA_SISFALL = list(EventLoaderConfig().theta_sd)
 DUAL_HEAD1_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static"}
@@ -61,7 +63,7 @@ SINGLE_HEAD_NAMES = {0: "Fall", 1: "Dynamic", 2: "Stable Posture", 3: "Postural 
 
 
 # CLI
-def get_args() -> argparse.Namespace:
+def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Train one SisFall single-head or dual-head SCN from cached Sigma-Delta event tensors."
     )
@@ -74,7 +76,7 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--cache-name", default="default", help="Cache name suffix used by sisfall_event_loader.")
     p.add_argument("--refresh-cache", action="store_true", help="Force rebuild of the SisFall event cache.")
     p.add_argument("--refresh-posture", action="store_true", help="Force rebuild of posture-refinement labels.")
-    p.add_argument("--split", type=float, nargs=3, default=[0.8, 0.1, 0.1], metavar=("TRAIN", "VAL", "TEST"), help="Subject-level split fractions; subjects never overlap between sets.")
+    p.add_argument("--split", type=float, nargs=3, default=[0.64, 0.16, 0.20], metavar=("TRAIN", "VAL", "TEST"), help="Subject-level split fractions; subjects never overlap between sets.")
 
     # Event encoding
     p.add_argument("--raw-win", type=int, default=410, help="Raw SisFall window length.")
@@ -139,7 +141,13 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--head-rate-scale", type=float, default=8.0, help="Rate scaling for spiking heads.")
     p.add_argument("--spiking-heads", action=argparse.BooleanOptionalAction, default=False, help="Use spiking readout heads instead of dense heads.")
 
-    return p.parse_args()
+    add_paper_arguments(p, sisfall=True)
+    cfg = p.parse_args(argv)
+    if cfg.epochs < 1 or cfg.batch_size < 1 or cfg.workers < 0:
+        p.error("epochs/batch-size must be positive and workers nonnegative.")
+    if cfg.activation == "relu" and cfg.spiking_heads:
+        p.error("ReLU baselines require dense heads.")
+    return cfg
 
 
 
@@ -166,6 +174,7 @@ def make_loader_cfg(cfg: argparse.Namespace) -> EventLoaderConfig:
         batch_size=512,
         num_workers=0,
         pin_memory=False,
+        input_mode=getattr(cfg, "input_mode", "sigma_delta"),
     )
 
 def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
@@ -184,6 +193,15 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
     )
 
     pin = bool((not cfg.no_pin_memory) and dev.type == "cuda")
+    verify_calibration_subjects(cfg, metadata)
+    verify_publication_data(cfg, splits, metadata, "sisfall")
+    if getattr(cfg, "manual_eval_only", False):
+        for name in ("val", "test"):
+            part = dict(splits[name])
+            silver = (part["y_h1"] == H1_STATIC) & (part["src_h2"] != 1)
+            part["w_h2"] = np.where(silver, 0, part["w_h2"]).astype(np.float32)
+            part["y_h2"] = np.where(silver, 0.5, part["y_h2"]).astype(np.float32)
+            splits[name] = part
     out: dict[str, Any] = {
         "splits": splits,
         "metadata": metadata,
@@ -267,6 +285,9 @@ def run_epoch_dual(
     y_pred_h1: list[torch.Tensor] = []
     y_true_h2: list[torch.Tensor] = []
     y_pred_h2: list[torch.Tensor] = []
+    cascade_truth, cascade_prediction = [], []
+    cascade_counts = np.zeros((4, 4), dtype=np.int64)
+    h1_counts = np.zeros((getattr(cfg, "n_classes", 3),) * 2, dtype=np.int64)
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     with grad_ctx:
@@ -309,6 +330,14 @@ def run_epoch_dual(
 
             bs = int(y_h1.shape[0])
             m = dual_head_metrics(outputs, y_h1, y_h2, w_h2)
+            pred1 = outputs["head1"].argmax(dim=1)
+            pred2 = (squeeze_binary_logits(outputs["head2"]) >= 0).long()
+            gold_static = (y_h1 == H1_STATIC) & (src_h2 == 1) & (w_h2 > 0) & ((y_h2 == 0) | (y_h2 == 1))
+            gold = (y_h1 != H1_STATIC) | gold_static
+            gold4 = torch.where(y_h1 == H1_STATIC, 2 + y_h2.long(), y_h1)[gold]
+            pred4 = torch.where(pred1 == H1_STATIC, 2 + pred2, pred1)[gold]
+            update_confusion(h1_counts, y_h1, pred1)
+            update_confusion(cascade_counts, gold4, pred4)
             total += bs
             h1_correct += m["h1_correct"]
             h2_correct += m["h2_correct"]
@@ -323,7 +352,9 @@ def run_epoch_dual(
                 y_pred_h1.append(pred_h1.detach().cpu())
 
                 logits_h2 = squeeze_binary_logits(outputs["head2"])
-                valid_h2 = (y_h1 == H1_STATIC) & (~torch.isclose(y_h2, torch.tensor(0.5, device=y_h2.device, dtype=y_h2.dtype))) & (w_h2 > 0)
+                valid_h2 = gold_static
+                cascade_truth.append(gold4.detach().cpu())
+                cascade_prediction.append(pred4.detach().cpu())
                 if bool(valid_h2.any()):
                     pred_h2 = (torch.sigmoid(logits_h2[valid_h2]) >= 0.5).long()
                     y_true_h2.append(y_h2[valid_h2].long().detach().cpu())
@@ -337,12 +368,18 @@ def run_epoch_dual(
         "acc_h2": h2_correct / max(h2_total, 1) if h2_total > 0 else float("nan"),
         "n": int(total),
         "n_h2": int(h2_total),
+        "macro_f1_h1": confusion_metrics(h1_counts)["macro_f1"],
     }
     if collect_predictions:
         out["y_true_h1"] = torch.cat(y_true_h1).numpy() if y_true_h1 else np.array([], dtype=np.int64)
         out["y_pred_h1"] = torch.cat(y_pred_h1).numpy() if y_pred_h1 else np.array([], dtype=np.int64)
         out["y_true_h2"] = torch.cat(y_true_h2).numpy() if y_true_h2 else np.array([], dtype=np.int64)
         out["y_pred_h2"] = torch.cat(y_pred_h2).numpy() if y_pred_h2 else np.array([], dtype=np.int64)
+        if getattr(cfg, "dataset", None) != "kfall":
+            out["y_true_cascade"] = torch.cat(cascade_truth).numpy()
+            out["y_pred_cascade"] = torch.cat(cascade_prediction).numpy()
+    if getattr(cfg, "dataset", None) != "kfall":
+        out["cascade_manual"] = confusion_metrics(cascade_counts)
     return out
 
 
@@ -365,6 +402,7 @@ def run_epoch_single(
     total = 0
     y_true_chunks: list[torch.Tensor] = []
     y_pred_chunks: list[torch.Tensor] = []
+    counts = np.zeros((getattr(cfg, "n_classes", 4),) * 2, dtype=np.int64)
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     with grad_ctx:
@@ -394,6 +432,7 @@ def run_epoch_single(
 
             bs = int(y.shape[0])
             pred = logits.argmax(dim=1)
+            update_confusion(counts, y, pred)
             total += bs
             loss_sum += float(loss.detach().item()) * bs
             correct += int((pred == y).sum().item())
@@ -406,6 +445,7 @@ def run_epoch_single(
         "loss": loss_sum / max(total, 1),
         "acc": correct / max(total, 1),
         "n": int(total),
+        "macro_f1": confusion_metrics(counts)["macro_f1"],
     }
     if collect_predictions:
         out["y_true"] = torch.cat(y_true_chunks).numpy() if y_true_chunks else np.array([], dtype=np.int64)
@@ -465,6 +505,11 @@ def estimate_class_weight(cfg: argparse.Namespace, data: dict[str, Any], dev: to
 
 def save_test_outputs(cfg: argparse.Namespace, metrics_dir: Path, test_metrics: dict[str, Any]) -> dict[str, Any]:
     if cfg.head_mode == "dual":
+        cascade_true = test_metrics.pop("y_true_cascade")
+        cascade_pred = test_metrics.pop("y_pred_cascade")
+        save_classification_outputs(metrics_dir, prefix="cascade_manual", y_true=cascade_true,
+                                    y_pred=cascade_pred, labels=[0, 1, 2, 3],
+                                    names=[SINGLE_HEAD_NAMES[i] for i in range(4)])
         y_true_h1 = test_metrics.pop("y_true_h1")
         y_pred_h1 = test_metrics.pop("y_pred_h1")
         y_true_h2 = test_metrics.pop("y_true_h2")
@@ -506,8 +551,9 @@ def save_test_outputs(cfg: argparse.Namespace, metrics_dir: Path, test_metrics: 
 
 
 # Main
-def main() -> None:
-    cfg = get_args()
+def main(argv: list[str] | None = None) -> Path:
+    cfg = get_args(argv)
+    load_theta_config(cfg, "sisfall")
     set_seed(cfg.seed)
     dev = get_device(cfg.gpu)
 
@@ -634,8 +680,15 @@ def main() -> None:
 
     if not ckpt_path.is_file():
         raise RuntimeError("No checkpoint was saved. Check training/validation data and loss values.")
+    if cfg.skip_test:
+        save_json(metrics_dir / "validation_selection.json", {
+            "best_val_loss": best_val, "best_epoch": fit_result["best_epoch"],
+            "test_evaluated": False, "parameters": n_params,
+        })
+        print(f"[done] validation-only saved_run={run_dir}")
+        return run_dir
 
-    ckpt = torch.load(ckpt_path, map_location=dev)
+    ckpt = torch.load(ckpt_path, map_location=dev, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
 
     test_metrics = run_epoch(
@@ -663,6 +716,7 @@ def main() -> None:
     print("\n[test]")
     print(json.dumps(json_ready(test_metrics), indent=2, ensure_ascii=False))
     print(f"[done] saved_run={run_dir}")
+    return run_dir
 
 
 if __name__ == "__main__":

@@ -29,9 +29,8 @@ except ModuleNotFoundError:
         sys.path.insert(0, str(project_root))
     from loaders import utils as u
 
-from preprocess.event_encoding import sigma_delta
+from preprocess.frontends import encode_window
 from preprocess.utils import subject_split_indices
-from preprocess.interpolate_signal import make_linear_resample_plan, resample_window_linear_exact
 
 H1_FALL = 0
 H1_DYNAMIC = 1
@@ -46,7 +45,7 @@ ARRAY_KEYS = ("x_ev", "offset", "y_h1", "y_h2", "src_h2", "w_h2", "file_idx", "s
 @dataclass(frozen=True)
 class EventLoaderConfig:
     seed: int = 0
-    split: tuple[float, float, float] = (0.8, 0.1, 0.1)
+    split: tuple[float, float, float] = (0.64, 0.16, 0.20)
     raw_win: int = 410
     out_win: int = 2048
     n_ch: int = 6
@@ -65,6 +64,7 @@ class EventLoaderConfig:
     dtype: str = "int32"
     ev_dtype: str = "uint8"
     offset_dtype: str = "float32"
+    input_mode: str = "sigma_delta"
     verbose_every: int = 2000
     batch_size: int = 512
     num_workers: int = 12
@@ -198,7 +198,7 @@ def load_or_build_sisfall_event_splits(
     out_dir = cache_dir / f"sisfall_event_loader_{run_name}"
     meta_path = out_dir / "metadata.json"
 
-    expected = _metadata_template(dataset_root, label_dir, result_dir, run_name, cfg)
+    expected = _metadata_template(dataset_root, label_dir, result_dir, run_name, cfg, posture_cfg)
     cache_ok = _cache_is_valid(out_dir, meta_path, expected)
 
     if cache_ok and not refresh and not refresh_posture:
@@ -212,6 +212,10 @@ def load_or_build_sisfall_event_splits(
         print("[sisfall:cache] Building event-loader cache.")
 
     x, y, meta, skipped = _load_sisfall(dataset_root, cache_dir, cfg, verbose=verbose)
+    subjects = np.asarray([record["subject"] for record in meta])
+    idx_tr, idx_va, idx_te = subject_split_indices(subjects, split=cfg.split, seed=cfg.seed)
+    split_indices = dict(zip(SPLIT_NAMES, (idx_tr, idx_va, idx_te)))
+    training_subjects = sorted(np.unique(subjects[idx_tr]).tolist())
     posture = _load_or_build_posture_tags(
         dataset_root=dataset_root,
         label_dir=label_dir,
@@ -222,16 +226,13 @@ def load_or_build_sisfall_event_splits(
         posture_cfg=posture_cfg,
         refresh=refresh_posture,
         verbose=verbose,
+        train_subjects=training_subjects,
     )
 
     ann = build_head2_annotation_map(
         autotag_records=posture.get("records", []),
         manual_records=posture.get("manual_records", []),
     )
-    subjects = np.asarray([record["subject"] for record in meta])
-    idx_tr, idx_va, idx_te = subject_split_indices(subjects, split=cfg.split, seed=cfg.seed)
-    split_indices = dict(zip(SPLIT_NAMES, (idx_tr, idx_va, idx_te)))
-
     total_windows = (
         count_event_windows(x, y, idx_tr, cfg)
         + count_event_windows(x, y, idx_va, cfg)
@@ -299,6 +300,7 @@ def load_or_build_sisfall_event_splits(
         "split_windows": split_windows,
         "split_summary": {name: summarize_split(split) for name, split in splits.items()},
         "posture_summary": posture.get("summary", {}),
+        "posture_calibration": posture.get("summary", {}).get("calibration", {}),
     }
 
     save_event_splits(splits, out_dir, metadata=metadata, verbose=verbose)
@@ -443,9 +445,8 @@ def build_event_split(
     progress_total: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Segment, linearly interpolate, and Sigma-Delta encode one file split."""
-    plan = make_linear_resample_plan(in_len=cfg.raw_win, out_len=cfg.out_win)
     theta = np.asarray(cfg.theta_sd, dtype=np.float32)
-    ev_dtype = np.dtype(cfg.ev_dtype)
+    ev_dtype = np.dtype("float32" if cfg.input_mode == "raw" else cfg.ev_dtype)
     off_dtype = np.dtype(cfg.offset_dtype)
 
     if theta.shape != (cfg.n_ch,):
@@ -477,8 +478,8 @@ def build_event_split(
             if x_raw.shape[0] != cfg.raw_win:
                 continue
 
-            x_ip = resample_window_linear_exact(x_raw, plan=plan)
-            ev, _, _ = sigma_delta(x_ip, theta=theta, init=cfg.sd_init, dead_zone=cfg.dead_zone, return_reconstruction=False)
+            ev = encode_window(x_raw, mode=cfg.input_mode, out_win=cfg.out_win, theta=theta,
+                               sd_init=cfg.sd_init, dead_zone=cfg.dead_zone)
             y_h2, src_h2, w_h2 = _head2_target(yi, int(s), rec_ann, cfg, h2_counts)
 
             x_ev.append(np.asarray(ev, dtype=ev_dtype))
@@ -723,8 +724,10 @@ def _load_or_build_posture_tags(
     posture_cfg: Any | None,
     refresh: bool,
     verbose: bool,
+    *,
+    train_subjects: Iterable[str],
 ) -> dict[str, Any]:
-    from labeling.sisfall_posture_tagging import TaggingConfig, run_posture_tagging
+    from posture_tagging import TaggingConfig, run_posture_tagging
 
     if posture_cfg is None:
         posture_cfg = TaggingConfig(acc=cfg.acc, dtype=cfg.dtype)
@@ -740,6 +743,7 @@ def _load_or_build_posture_tags(
         refresh=refresh,
         save_plot=False,
         verbose=verbose,
+        train_subjects=train_subjects,
     )
 
 def _metadata_template(
@@ -748,10 +752,18 @@ def _metadata_template(
     result_dir: Path,
     run_name: str,
     cfg: EventLoaderConfig,
+    posture_cfg: Any | None = None,
 ) -> dict[str, Any]:
+    from posture_tagging import TaggingConfig, posture_input_fingerprint
+
+    if posture_cfg is None:
+        posture_cfg = TaggingConfig(acc=cfg.acc, dtype=cfg.dtype)
     return {
-        "version": 2,
+        "version": 3,
         "split_strategy": "subject",
+        "posture_strategy": "train_gold_balanced_accuracy_grid",
+        "posture_config": u.json_ready(asdict(posture_cfg)),
+        "posture_input_fingerprint": posture_input_fingerprint(dataset_root, label_dir),
         "run_name": str(run_name),
         "dataset_root": str(dataset_root),
         "label_dir": str(label_dir),
@@ -766,7 +778,11 @@ def _cache_is_valid(root: Path, meta_path: Path, expected: dict[str, Any]) -> bo
         expected,
         split_names=SPLIT_NAMES,
         array_keys=ARRAY_KEYS,
-        metadata_keys=("version", "run_name", "config", "dataset_root", "label_dir", "result_dir", "split_strategy"),
+        metadata_keys=(
+            "version", "run_name", "config", "dataset_root", "label_dir",
+            "result_dir", "split_strategy", "posture_strategy", "posture_config",
+            "posture_input_fingerprint",
+        ),
     )
 
 __all__ = [

@@ -16,19 +16,20 @@ from loaders.kfall_event_loader import ARRAY_KEYS, CLASS_NAMES
 
 
 class KFallTensorDataset(Dataset):
-    """Return tensor views; events remain uint8 until batch transfer/conversion."""
+    """Return tensor views, retaining uint8 events or float32 native samples."""
 
     def __init__(self, tensors: dict[str, torch.Tensor]) -> None:
         self.tensors = tensors
         n = len(tensors["y_h1"])
-        if tensors["x_ev"].ndim != 4 or tensors["x_ev"].shape[0] != n or tensors["x_ev"].shape[2:] != (6, 2):
-            raise ValueError("Tensor cache events must have shape (N, Te, 6, 2).")
+        x = tensors["x_ev"]
+        events = x.ndim == 4 and x.shape[2:] == (6, 2) and x.dtype == torch.uint8
+        raw = x.ndim == 3 and x.shape[2] == 6 and x.dtype == torch.float32
+        if x.shape[0] != n or not (events or raw):
+            raise ValueError("Tensor cache requires uint8 events (N, Te, 6, 2) or float32 raw (N, T, 6).")
         for key, value in tensors.items():
             expected = (n, 6) if key == "offset" else (n,)
             if key != "x_ev" and tuple(value.shape) != expected:
                 raise ValueError(f"Tensor cache {key} has inconsistent shape.")
-        if tensors["x_ev"].dtype != torch.uint8:
-            raise ValueError("Tensor cache events must be uint8.")
         if tensors["y_h1"].dtype != torch.int64 or not torch.isin(
             tensors["y_h1"], torch.tensor(list(CLASS_NAMES)),
         ).all():

@@ -22,7 +22,7 @@ from loaders import utils as u
 from labeling.kfall_manual_labels import load_manual_labels
 from preprocess.event_encoding import sigma_delta
 from preprocess.interpolate_signal import interpolate_to_times
-from preprocess.preprocess_kfall import load_kfall_3class
+from preprocess.preprocess_kfall import FILE_RE, load_kfall_3class
 from preprocess.utils import subject_split_indices
 
 SPLIT_NAMES = ("train", "val", "test")
@@ -55,8 +55,11 @@ class KFallEventLoaderConfig:
     num_workers: int = 4
     pin_memory: bool = True
     excluded_tasks: tuple[str, ...] = ()
+    input_mode: str = "sigma_delta"
 
     def __post_init__(self) -> None:
+        if self.input_mode not in {"raw", "sigma_delta"}:
+            raise ValueError("input_mode must be raw or sigma_delta.")
         if any(task not in TASK_CODES for task in self.excluded_tasks):
             raise ValueError("excluded_tasks must contain KFall task codes T01..T36.")
         if self.raw_win < 2 or self.out_win < 2 or self.stride < 1:
@@ -147,12 +150,25 @@ def signal_to_events(
     frames = np.asarray(frames, dtype=np.int64)
     times = (frames - frames[0]).astype(np.float64) / cfg.sample_rate_hz
     destination = np.linspace(0.0, times[-1], cfg.out_win, dtype=np.float32)
-    interpolated = interpolate_to_times(signal, times, destination, method="linear")
+    interpolated = (signal.copy() if cfg.out_win == len(signal) else
+                    interpolate_to_times(signal, times, destination, method="linear"))
+    if cfg.input_mode == "raw":
+        return interpolated, signal[0].copy()
     events, _, _ = sigma_delta(
         interpolated, theta=np.asarray(cfg.theta_sd, dtype=np.float32),
         init=cfg.sd_init, dead_zone=cfg.dead_zone, return_reconstruction=False,
     )
     return events, signal[0].copy()
+
+
+def window_frame_arrays(split, metadata, raw_win):
+    rows = []
+    for file_index, start in zip(split["file_idx"], split["start"]):
+        record = metadata["recordings"][int(file_index)]
+        frames = record.get("frame_grid")
+        rows.append(np.arange(int(start) + 1, int(start) + raw_win + 1) if frames is None else
+                    np.asarray(frames)[int(start):int(start) + raw_win])
+    return np.asarray(rows, dtype=np.int64)
 
 
 def build_event_split(
@@ -167,7 +183,8 @@ def build_event_split(
     if count == 0:
         raise RuntimeError(f"No KFall windows generated for '{name}'; check subjects, labels and raw_win.")
     shapes = {
-        "x_ev": ((count, cfg.out_win, 6, 2), np.uint8),
+        "x_ev": (((count, cfg.out_win, 6), np.float32) if cfg.input_mode == "raw" else
+                 ((count, cfg.out_win, 6, 2), np.uint8)),
         "offset": ((count, 6), np.float32), "y_h1": ((count,), np.int64),
         "y_h2": ((count,), np.float32), "src_h2": ((count,), np.uint8),
         "w_h2": ((count,), np.float32), "file_idx": ((count,), np.int32),
@@ -220,8 +237,10 @@ def build_event_split(
 
 
 def _source_signature(root: Path, label_dir: Path) -> dict[str, Any]:
-    files = sorted({path for base, suffix in ((root, ".csv"), (label_dir, ".xlsx"))
-                    for path in base.rglob("*") if path.is_file() and path.suffix.lower() == suffix})
+    sensor_root = root / "sensor_data" if (root / "sensor_data").is_dir() else root
+    files = sorted({path for base, suffix in ((sensor_root, ".csv"), (label_dir, ".xlsx"))
+                    for path in base.rglob("*") if path.is_file() and path.suffix.lower() == suffix
+                    and (suffix != ".csv" or FILE_RE.fullmatch(path.name))})
     inventory = [(str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns)
                  for path in files if not path.name.startswith("~$")]
     return {"sha256": hashlib.sha256(json.dumps(inventory).encode()).hexdigest(), "files": len(inventory)}

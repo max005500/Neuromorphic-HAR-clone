@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -51,13 +53,19 @@ def load_sisfall_3class(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     cache_path = cache_dir / f"sisfall_3class_{acc.lower()}_{dt.name}.npz"
+    source_files = sorted(path for path in root.rglob("*") if path.suffix.lower() == ".txt")
+    fingerprint = hashlib.sha256(json.dumps([
+        (str(root.resolve()), [(str(path.relative_to(root)), path.stat().st_size, path.stat().st_mtime_ns)
+                              for path in source_files])
+    ]).encode()).hexdigest()
     if cache_path.exists() and not refresh:
-        d = np.load(cache_path, allow_pickle=True)
-        x = d["x"]
-        y = d["y"].astype(np.int64)
-        meta = list(d["meta"].tolist())
-        skipped = int(d["skipped"])
-        return x, y, meta, skipped
+        with np.load(cache_path, allow_pickle=True) as d:
+            if "source_fingerprint" in d and str(d["source_fingerprint"].item()) == fingerprint:
+                x = d["x"]
+                y = d["y"].astype(np.int64)
+                meta = list(d["meta"].tolist())
+                skipped = int(d["skipped"])
+                return x, y, meta, skipped
 
     xs: list[np.ndarray] = []
     ys: list[int] = []
@@ -137,6 +145,7 @@ def load_sisfall_3class(
         y=y_arr,
         meta=meta_obj,
         skipped=np.asarray(skipped),
+        source_fingerprint=np.asarray(fingerprint),
     )
 
     return x_obj, y_arr, meta, skipped

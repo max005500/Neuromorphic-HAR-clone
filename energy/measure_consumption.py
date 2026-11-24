@@ -62,12 +62,12 @@ class SCNEnergyProfiler:
 
     def __init__(self, model: nn.Module, include_data_movement: bool = True, offset_as_dense_mac: bool = True) -> None:
         if (getattr(model, "temporal_gru", None) is not None
-                or getattr(model, "temporal_srnn", None) is not None
-                or getattr(model, "activation", "lif") != "lif"):
-            raise ValueError("The SCN energy profiler does not account for GRU, recurrent LIF, or ReLU models.")
+                or getattr(model, "temporal_srnn", None) is not None):
+            raise ValueError("The energy profiler does not account for GRU or recurrent LIF models.")
         self.model = model
         self.include_data_movement = bool(include_data_movement)
         self.offset_as_dense_mac = bool(offset_as_dense_mac)
+        self.dense_ann = getattr(model, "activation", "lif") == "relu"
         self.layer_stats = defaultdict(self._new_layer_stat)
         self.activation_stats = defaultdict(lambda: {"nonzero": 0, "numel": 0, "calls": 0, "last_shape": ""})
         self.handles: list[Any] = []
@@ -137,9 +137,12 @@ class SCNEnergyProfiler:
             dense_macs = float(x.shape[0] * output.shape[-1] * mod.out_channels * (mod.in_channels // mod.groups) * mod.kernel_size[0])
             nonzero, numel = count_nonzero_numel(x)
             stat = self.layer_stats[name]
-            stat.update(kind="spiking_conv1d", group="backbone", last_input_shape=str(tuple(x.shape)), last_output_shape=str(tuple(output.shape)))
+            dense_input = self.dense_ann or (name == "conv1" and getattr(self.model, "input_mode", "sigma_delta") == "raw")
+            stat.update(kind="dense_conv1d" if self.dense_ann else
+                        "spiking_conv_dense_input" if dense_input else "spiking_conv1d",
+                        group="backbone", last_input_shape=str(tuple(x.shape)), last_output_shape=str(tuple(output.shape)))
             stat["dense_macs"] += dense_macs
-            stat["effective_sops"] += dense_macs * _rate(nonzero, numel, default=0.0)
+            stat["effective_sops"] += dense_macs if dense_input else dense_macs * _rate(nonzero, numel, default=0.0)
             stat["input_nonzero"] += nonzero
             stat["input_numel"] += numel
             stat["calls"] += 1
@@ -174,7 +177,8 @@ class SCNEnergyProfiler:
             nonzero, numel = count_nonzero_numel(x)
             stat = self.layer_stats[name]
             stat.update(
-                kind="spiking_linear_dense_input" if analog_or_dense_input else "spiking_linear_sparse_input",
+                kind="dense_linear" if self.dense_ann else
+                     "spiking_linear_dense_input" if analog_or_dense_input else "spiking_linear_sparse_input",
                 group=group,
                 last_input_shape=str(tuple(x.shape)),
                 last_output_shape=str(tuple(output.shape)),
@@ -187,7 +191,7 @@ class SCNEnergyProfiler:
             stat["calls"] += 1
 
         self.handles.append(fc.register_forward_hook(fc_hook))
-        if lif is not None:
+        if lif is not None and not self.dense_ann:
             self.handles.append(lif.register_forward_hook(lambda _m, _i, y, layer=name: self._add_lif(layer, y)))
 
     def _register_dense_linear(self, name: str, layer: nn.Linear, group: str) -> None:
@@ -228,7 +232,7 @@ class SCNEnergyProfiler:
                 "kind": stat["kind"],
                 "calls": stat["calls"],
                 "input_rate": _rate(stat["input_nonzero"], stat["input_numel"]),
-                "lif_output_rate": _rate(stat["lif_nonzero"], stat["lif_numel"]),
+                "lif_output_rate": _rate(stat["lif_nonzero"], stat["lif_numel"]) if stat["lif_numel"] else None,
                 "dense_equiv_macs_total": stat["dense_macs"],
                 "effective_sops_total": stat["effective_sops"],
                 "lif_ops_total": stat["lif_ops"],
@@ -254,6 +258,8 @@ class SCNEnergyProfiler:
         compute = float(totals["energy_compute_norm"])
         pe_total = float(totals["energy_pe_total_norm"])
         summary = {
+            "energy_model": "v2_dense_input_and_data_movement_accounted",
+            "energy_unit": "normalized_to_one_dense_MAC_not_joules",
             "n_samples": n_samples,
             "dense_equiv_macs_total": dense_equiv,
             "effective_sops_total": float(totals["effective_sops"]),
@@ -297,12 +303,12 @@ class SCNEnergyProfiler:
         if kind in {"spiking_conv1d", "spiking_linear_sparse_input"}:
             compute = effective_sops * ENERGY["E_SNN_AC"] + lif_ops * ENERGY["E_LIF"]
             data = effective_sops * (ENERGY["E_ISPAD"] + ENERGY["E_WSPAD"]) if self.include_data_movement else 0.0
-        elif kind == "spiking_linear_dense_input":
+        elif kind in {"spiking_linear_dense_input", "spiking_conv_dense_input"}:
             compute = dense_macs * ENERGY["E_DENSE_MAC"] + lif_ops * ENERGY["E_LIF"]
-            data = 0.0
-        elif kind == "dense_linear":
+            data = dense_macs * (ENERGY["E_ISPAD"] + ENERGY["E_WSPAD"]) if self.include_data_movement else 0.0
+        elif kind in {"dense_linear", "dense_conv1d"}:
             compute = dense_macs * ENERGY["E_DENSE_MAC"]
-            data = 0.0
+            data = dense_macs * (ENERGY["E_ISPAD"] + ENERGY["E_WSPAD"]) if self.include_data_movement else 0.0
         else:
             compute = data = 0.0
         return {"energy_compute_norm": compute, "energy_data_norm": data, "energy_pe_total_norm": compute + data}

@@ -72,8 +72,11 @@ class UCIHAREventLoaderConfig:
     pin_memory: bool = True
     sample_rate_hz: int = 50
     window_stride: int | None = None
+    input_mode: str = "sigma_delta"
 
     def __post_init__(self) -> None:
+        if self.input_mode not in {"raw", "sigma_delta"}:
+            raise ValueError("input_mode must be raw or sigma_delta.")
         if self.sample_rate_hz not in (50, 100):
             raise ValueError("UCI sample_rate_hz must be 50 or 100.")
         if not 2 <= self.raw_win <= round(2.56 * self.sample_rate_hz):
@@ -106,8 +109,9 @@ class UCIHAREventDataset(Dataset):  # type: ignore[misc]
         n = int(self.y.shape[0])
         if self.x_ev.shape[0] != n or self.offset.shape[0] != n or self.domain.shape[0] != n:
             raise ValueError("All split arrays must have the same first dimension.")
-        if self.x_ev.ndim != 4 or self.x_ev.shape[2:] != (6, 2):
-            raise ValueError(f"x_ev must have shape (N, Te, 6, 2). Got {tuple(self.x_ev.shape)}.")
+        if not ((self.x_ev.ndim == 4 and self.x_ev.shape[2:] == (6, 2))
+                or (self.x_ev.ndim == 3 and self.x_ev.shape[2] == 6)):
+            raise ValueError(f"x_ev must be event (N, Te, 6, 2) or raw (N, T, 6). Got {tuple(self.x_ev.shape)}.")
         if self.offset.ndim != 2 or self.offset.shape[1] != 6:
             raise ValueError(f"offset must have shape (N, 6). Got {tuple(self.offset.shape)}.")
 
@@ -263,9 +267,10 @@ def build_event_split(
         raise ValueError("theta_sd values must be positive.")
 
     out_win = cfg.resolved_out_win()
-    ev_dtype = np.dtype(cfg.ev_dtype)
+    ev_dtype = np.dtype("float32" if cfg.input_mode == "raw" else cfg.ev_dtype)
     off_dtype = np.dtype(cfg.offset_dtype)
-    ev = np.empty((X.shape[0], out_win, cfg.n_ch, 2), dtype=ev_dtype)
+    shape = (X.shape[0], out_win, cfg.n_ch)
+    ev = np.empty(shape if cfg.input_mode == "raw" else (*shape, 2), dtype=ev_dtype)
     offset = np.asarray(X[:, 0, :], dtype=off_dtype, order="C")
     plan = make_resample_plan(cfg.raw_win, out_win, method="linear", dtype=np.float32) if cfg.interp_method == "linear" else None
 
@@ -278,8 +283,11 @@ def build_event_split(
         else:
             x_ip = interpolate_signal(X[i], out_len=out_win, method=cfg.interp_method, dtype=np.float32)
 
-        out = sigma_delta(x_ip, theta=theta, init=cfg.sd_init, dead_zone=cfg.dead_zone, return_reconstruction=False)
-        ev_i = out[0] if isinstance(out, (tuple, list)) else out
+        if cfg.input_mode == "raw":
+            ev_i = x_ip
+        else:
+            ev_i = sigma_delta(x_ip, theta=theta, init=cfg.sd_init, dead_zone=cfg.dead_zone,
+                               return_reconstruction=False)[0]
         ev[i] = np.asarray(ev_i, dtype=ev_dtype)
 
         if verbose and cfg.verbose_every and (i + 1) % int(cfg.verbose_every) == 0:

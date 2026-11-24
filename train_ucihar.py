@@ -37,6 +37,8 @@ from train.utils import (
 import numpy as np
 import torch
 import torch.nn.functional as F
+from train.paper_protocol import add_paper_arguments, load_theta_config, verify_calibration_subjects, verify_publication_data
+from train.classification import update_confusion, confusion_metrics
 
 from loaders.ucihar_event_loader import (
     ACTIVITY_LABELS,
@@ -130,9 +132,12 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--head-rate-scale", type=float, default=8.0, help="Rate scaling for spiking heads.")
     p.add_argument("--spiking-heads", action="store_true", help="Use spiking readout heads instead of dense heads.")
 
+    add_paper_arguments(p)
     cfg = p.parse_args(argv)
     if cfg.epochs < 1 or cfg.batch_size < 1 or cfg.workers < 0:
         p.error("epochs/batch-size must be positive and workers nonnegative.")
+    if cfg.activation == "relu" and cfg.spiking_heads:
+        p.error("ReLU baselines require dense heads.")
     return cfg
 
 
@@ -169,6 +174,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         batch_size=256,
         num_workers=0,
         pin_memory=False,
+        input_mode=getattr(cfg, "input_mode", "sigma_delta"),
     )
 
     splits, metadata = load_or_build_ucihar_event_splits(
@@ -183,6 +189,8 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
     )
 
     pin = bool((not cfg.no_pin_memory) and dev.type == "cuda")
+    verify_calibration_subjects(cfg, metadata)
+    verify_publication_data(cfg, splits, metadata, "ucihar")
     loaders = make_event_loaders(
         splits,
         cfg=cache_cfg,
@@ -227,6 +235,7 @@ def run_epoch(
     total = 0
     y_true_chunks: list[torch.Tensor] = []
     y_pred_chunks: list[torch.Tensor] = []
+    counts = np.zeros((cfg.n_classes, cfg.n_classes), dtype=np.int64)
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     with grad_ctx:
@@ -256,6 +265,7 @@ def run_epoch(
 
             bs = int(y.shape[0])
             pred = logits.argmax(dim=1)
+            update_confusion(counts, y, pred)
             total += bs
             loss_sum += float(loss.detach().item()) * bs
             correct += int((pred == y).sum().item())
@@ -268,6 +278,7 @@ def run_epoch(
         "loss": loss_sum / max(total, 1),
         "acc": correct / max(total, 1),
         "n": int(total),
+        "macro_f1": confusion_metrics(counts)["macro_f1"],
     }
     if collect_predictions:
         out["y_true"] = torch.cat(y_true_chunks).numpy() if y_true_chunks else np.array([], dtype=np.int64)
@@ -277,8 +288,9 @@ def run_epoch(
 
 
 # Main
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> Path:
     cfg = get_args(argv)
+    load_theta_config(cfg, "ucihar")
     set_seed(cfg.seed)
     dev = get_device(cfg.gpu)
 
@@ -402,8 +414,15 @@ def main(argv: list[str] | None = None) -> None:
 
     if not ckpt_path.is_file():
         raise RuntimeError("No checkpoint was saved. Check training/validation data and loss values.")
+    if cfg.skip_test:
+        save_json(metrics_dir / "validation_selection.json", {
+            "best_val_loss": best_val, "best_epoch": fit_result["best_epoch"],
+            "test_evaluated": False, "parameters": n_params,
+        })
+        print(f"[done] validation-only saved_run={run_dir}")
+        return run_dir
 
-    ckpt = torch.load(ckpt_path, map_location=dev)
+    ckpt = torch.load(ckpt_path, map_location=dev, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
 
     test_metrics = run_epoch(
@@ -436,6 +455,7 @@ def main(argv: list[str] | None = None) -> None:
     print("\n[test]")
     print(json.dumps(json_ready(test_metrics), indent=2, ensure_ascii=False))
     print(f"[done] saved_run={run_dir}")
+    return run_dir
 
 
 if __name__ == "__main__":

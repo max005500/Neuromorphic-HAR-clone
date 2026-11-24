@@ -14,6 +14,16 @@ The repository provides scripts to:
 - train UCI HAR single-head SCN models,
 - estimate normalized inference-stage energy consumption.
 
+## Paper resubmission protocol
+
+The subject-independent SisFall/UCI HAR/KFall B1--B5 experiment pipeline is documented
+in [docs/PAPER_PROTOCOL.md](docs/PAPER_PROTOCOL.md). It includes train-only theta
+and posture calibration, native-signal ANN/SNN baselines, five-seed manifests,
+manual-only posture evaluation, continuous-recording inference, raw-signal
+perturbations and strict statistical/energy reporting. KFall includes the
+1.20/2.06/3.20-second windows and existing manual-label/task-exclusion policy. Full experiments and
+manuscript results must still be produced; no paper scores are inferred.
+
 ## Environment
 
 Recommended:

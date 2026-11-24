@@ -69,6 +69,7 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         gru_hidden: int = 0,
         activation: str = "lif",
         srnn_hidden: int = 0,
+        input_mode: str = "sigma_delta",
     ):
         super().__init__()
 
@@ -90,6 +91,9 @@ class DualHeadSCN(nn.Module, EventInputMixin):
             raise ValueError("srnn_hidden must be nonnegative and requires LIF activation without a GRU.")
         self.conv_depth = conv_depth
         self.activation = activation
+        if input_mode not in {"sigma_delta", "raw"}:
+            raise ValueError("input_mode must be sigma_delta or raw.")
+        self.input_mode = input_mode
 
         self.offset_dim = int(self.n_channels if offset_dim is None else offset_dim)
         self.offset_hidden = int(offset_hidden)
@@ -157,7 +161,7 @@ class DualHeadSCN(nn.Module, EventInputMixin):
         _validate_non_negative(self.pool_paddings, "pool_paddings")
 
     def _build_backbone(self, p_drop: float, bias: bool, lif_kwargs: Dict[str, Any]) -> None:
-        input_channels = self.n_channels if self.merge_polarities else (2 * self.n_channels)
+        input_channels = self.n_channels if self.merge_polarities or self.input_mode == "raw" else (2 * self.n_channels)
         c1, c2, c3 = self.conv_channels
         self.out_dim = c3 if self.conv_depth == 3 else c2
 

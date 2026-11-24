@@ -134,6 +134,8 @@ def scn_model_kwargs(cfg: Any) -> dict[str, Any]:
         use_bn=True,
         p_drop=cfg.p_drop,
         bias=False,
+        activation=getattr(cfg, "activation", "lif"),
+        input_mode=getattr(cfg, "input_mode", "sigma_delta"),
     )
 
 

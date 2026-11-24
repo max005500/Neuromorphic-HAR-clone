@@ -52,7 +52,7 @@ def _data_config(metadata: dict[str, Any]) -> dict[str, Any]:
     config = metadata.get("config")
     if not isinstance(config, dict):
         raise ValueError("KFall evaluation metadata has no preprocessing config.")
-    return {"post_impact_seconds": 0.0, "excluded_tasks": [],
+    return {"post_impact_seconds": 0.0, "excluded_tasks": [], "input_mode": "sigma_delta",
             **{key: value for key, value in config.items() if key not in RUNTIME_CONFIG}}
 
 
@@ -141,6 +141,8 @@ def load_evaluation_data(
             raise ValueError(f"Checkpoint {saved_key} differs from the training dataset config.")
     if checkpoint_config.get("dataset", "kfall") != "kfall":
         raise ValueError("The checkpoint belongs to a different dataset.")
+    if checkpoint_config.get("input_mode", "sigma_delta") != config["input_mode"]:
+        raise ValueError("Checkpoint input_mode differs from the training dataset config.")
     if checkpoint_config.get("post_impact_seconds", 0.0) != config["post_impact_seconds"]:
         raise ValueError("Checkpoint post_impact_seconds differs from the training dataset config.")
     if _normalized(checkpoint_config.get("exclude_tasks", [])) != _normalized(config["excluded_tasks"]):
@@ -170,7 +172,8 @@ def load_evaluation_data(
     if count == 0:
         raise ValueError("The held-out test split has no windows.")
     shapes = {key: (count,) for key in ARRAY_KEYS}
-    shapes.update(x_ev=(count, cfg.out_win, 6, 2), offset=(count, 6))
+    shapes.update(x_ev=((count, cfg.out_win, 6) if cfg.input_mode == "raw" else
+                        (count, cfg.out_win, 6, 2)), offset=(count, 6))
     for key, shape in shapes.items():
         if arrays[key].shape != shape:
             raise ValueError(f"Invalid test {key} shape: expected {shape}, got {arrays[key].shape}.")
@@ -179,8 +182,9 @@ def load_evaluation_data(
             raise ValueError(f"Test {key} must use an integer dtype.")
     if np.any(arrays["end_frame"] < 1):
         raise ValueError("Test end_frame must contain positive FrameCounter values.")
-    if arrays["x_ev"].dtype != np.uint8:
-        raise ValueError("Test x_ev must contain uint8 binary events.")
+    expected_dtype = np.float32 if cfg.input_mode == "raw" else np.uint8
+    if arrays["x_ev"].dtype != expected_dtype:
+        raise ValueError(f"Test x_ev must use {np.dtype(expected_dtype).name} for {cfg.input_mode} input.")
     n_classes = 4 if cfg.post_impact_seconds > 0 else 3
     if not np.isin(arrays["y_h1"], range(n_classes)).all():
         raise ValueError("Test activity labels disagree with the configured KFall classes.")
@@ -190,7 +194,10 @@ def load_evaluation_data(
     # Bound temporary memory when validating a large event cache.
     for begin in range(0, count, 256):
         events = arrays["x_ev"][begin:begin + 256]
-        if not np.isin(events, (0, 1)).all() or np.any(events[..., 0] & events[..., 1]):
+        if cfg.input_mode == "raw":
+            if not np.isfinite(events).all():
+                raise ValueError("Test raw input contains non-finite values.")
+        elif not np.isin(events, (0, 1)).all() or np.any(events[..., 0] & events[..., 1]):
             raise ValueError("Test x_ev contains invalid or simultaneous ON/OFF events.")
     expected_files, expected_starts = [], []
     records = run_metadata["recordings"]
