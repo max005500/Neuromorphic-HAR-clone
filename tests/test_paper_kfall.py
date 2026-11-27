@@ -167,6 +167,12 @@ class KFallPaperTests(unittest.TestCase):
             data = build_data(cfg, torch.device("cpu"))
             self.assertEqual(set(data["splits"]["train"]["y_h1"]), set(range(11)))
             self.assertTrue(any(record["code"] == "T05" for record in data["metadata"]["recordings"]))
+            run = train_main(common + ["--theta-file", str(theta), "--epochs", "1",
+                                      "--out-dir", str(root / "runs"), "--conv-ch", "4", "4", "4",
+                                      "--kernels", "3", "3", "3"])
+            checkpoint = torch.load(run / "checkpoints" / "best_model.pt", map_location="cpu", weights_only=False)
+            self.assertEqual(checkpoint["config"]["theta"], provenance["theta"])
+            self.assertEqual(checkpoint["config"]["theta_provenance"]["window_config"]["label_scheme"], "extended")
             cfg.label_scheme = "legacy"
             with self.assertRaisesRegex(ValueError, "window/acquisition policy"):
                 build_data(cfg, torch.device("cpu"))
