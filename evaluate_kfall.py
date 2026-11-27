@@ -17,9 +17,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 from evaluation.kfall_data import load_evaluation_data
+from evaluation.kfall_classes import class_count, resolve_class_names
 from evaluation.kfall_reports import save_evaluation_reports
 from train.utils import extract_single_logits, make_autocast, set_seed
-from train_kfall import CLASS_NAMES, KFallTrainingDataset, build_model
+from train_kfall import KFallTrainingDataset, build_model
 
 
 def _device(value: str | torch.device) -> torch.device:
@@ -54,10 +55,10 @@ def _load_checkpoint(path: Path) -> tuple[dict[str, Any], SimpleNamespace]:
     if not isinstance(checkpoint.get("model_state_dict"), dict):
         raise ValueError("Checkpoint has no model_state_dict.")
     cfg = SimpleNamespace(**checkpoint["config"])
-    if getattr(cfg, "dataset", None) != "kfall" or getattr(cfg, "n_classes", None) not in (3, 4):
-        raise ValueError("Use a KFall checkpoint trained with three or four activity classes.")
-    if cfg.n_classes != (4 if getattr(cfg, "post_impact_seconds", 0.0) > 0 else 3):
-        raise ValueError("Checkpoint class count disagrees with its post-impact configuration.")
+    if getattr(cfg, "dataset", None) != "kfall":
+        raise ValueError("Use a KFall checkpoint.")
+    if getattr(cfg, "n_classes", None) != class_count(checkpoint["config"]):
+        raise ValueError("Checkpoint class count disagrees with its label scheme and post-impact configuration.")
     if getattr(cfg, "head_mode", None) not in {"single", "dual"}:
         raise ValueError("Checkpoint head_mode must be single or dual.")
     required = (
@@ -103,6 +104,7 @@ def evaluate_run(
     split, metadata, run_metadata, resolved_cache = load_evaluation_data(
         run_dir, saved["config"], cache_dir=cache_dir,
     )
+    class_names = resolve_class_names(run_metadata, saved["config"])
     indices = np.arange(len(split["y_h1"]), dtype=np.int64)
     if subject is not None:
         indices = indices[np.asarray(split["subject"])[indices] == subject]
@@ -140,7 +142,7 @@ def evaluate_run(
     elif cfg.class_weight != "none":
         raise ValueError(f"Unknown checkpoint class weighting: {cfg.class_weight}.")
 
-    dataset = KFallTrainingDataset(split)
+    dataset = KFallTrainingDataset(split, n_classes=cfg.n_classes)
     loader = DataLoader(Subset(dataset, indices.tolist()), batch_size=size, shuffle=False,
                         num_workers=int(workers), pin_memory=dev.type == "cuda")
     probabilities, targets = [], []
@@ -178,7 +180,7 @@ def evaluate_run(
         "label_smoothing": float(cfg.label_smoothing), "head_mode": cfg.head_mode,
         "head2_supervised": False, "fall_policy": cfg.fall_policy,
         "post_impact_seconds": getattr(cfg, "post_impact_seconds", 0.0),
-        "class_names": [CLASS_NAMES[key] for key in range(cfg.n_classes)],
+        "class_names": list(class_names),
         "selection": "full_test" if subject is None and window is None else "test_subset",
         "test_subjects": test_subjects,
         "all_test_subjects": run_metadata["split_subjects"]["test"],
@@ -191,8 +193,8 @@ def evaluate_run(
         prediction = int(probability[0].argmax())
         summary["selected_window"] = {
             "index": int(indices[0]), "subject": str(split["subject"][indices[0]]),
-            "true": CLASS_NAMES[int(y_true[0])], "predicted": CLASS_NAMES[prediction],
-            "probabilities": {CLASS_NAMES[key]: float(probability[0, key]) for key in range(cfg.n_classes)},
+            "true": class_names[int(y_true[0])], "predicted": class_names[prediction],
+            "probabilities": {class_names[key]: float(probability[0, key]) for key in range(cfg.n_classes)},
         }
     return save_evaluation_reports(destination, y_true=y_true, probabilities=probability,
                                    window_indices=indices, split=split, metadata=metadata, summary=summary,

@@ -65,7 +65,8 @@ def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, clas
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
-    figure = Figure(figsize=(11, 4.8), layout="constrained", facecolor="white")
+    extended = len(class_names) > 4
+    figure = Figure(figsize=(18, 8) if extended else (11, 4.8), layout="constrained", facecolor="white")
     FigureCanvasAgg(figure)
     try:
         for axis, values, title, is_normalized in zip(
@@ -76,12 +77,15 @@ def _confusion_plot(path: Path, counts: np.ndarray, normalized: np.ndarray, clas
             rendered = axis.imshow(values, cmap="Blues", vmin=0, vmax=maximum)
             axis.set(xticks=range(len(class_names)), yticks=range(len(class_names)), xticklabels=class_names,
                      yticklabels=class_names, xlabel="Predicción", ylabel="Clase real", title=title)
+            if extended:
+                axis.tick_params(axis="x", labelrotation=45, labelsize=8)
+                axis.tick_params(axis="y", labelsize=8)
             for row in range(len(class_names)):
                 for column in range(len(class_names)):
                     value = values[row, column]
                     label = ("—" if counts[row].sum() == 0 else f"{value:.1%}") if is_normalized else str(int(value))
                     axis.text(column, row, label, ha="center", va="center",
-                              color="white" if value > maximum / 2 else "#0f172a", fontsize=12)
+                              color="white" if value > maximum / 2 else "#0f172a", fontsize=8 if extended else 12)
             figure.colorbar(rendered, ax=axis, shrink=0.8)
         figure.suptitle(f"{dataset} · clasificación de ventanas", fontsize=14)
         figure.savefig(path, dpi=160)
@@ -107,7 +111,10 @@ def save_evaluation_reports(
     indices = np.asarray(window_indices)
     probabilities = np.asarray(probabilities, dtype=np.float64)
     class_names = tuple(summary.get("class_names", CLASS_NAMES))
-    if class_names not in (CLASS_NAMES, (*CLASS_NAMES, "PostImpact")):
+    if (len(class_names) not in (3, 4, 10, 11)
+            or any(not isinstance(name, str) or not name.strip() for name in class_names)
+            or len(set(class_names)) != len(class_names)
+            or set(class_names) & {"accuracy", "macro avg", "weighted avg", "micro avg"}):
         raise ValueError("Unsupported KFall class names.")
     n_classes = len(class_names)
     if truth.ndim != 1 or truth.dtype.kind not in "iu" or not np.isin(truth, range(n_classes)).all():
@@ -158,11 +165,18 @@ def save_evaluation_reports(
             "correct": int(truth[position] == predicted[position]),
             "confidence": float(probabilities[position, predicted[position]]),
             "prob_fall": float(probabilities[position, 0]),
-            "prob_dynamic": float(probabilities[position, 1]),
-            "prob_static": float(probabilities[position, 2]), "lead_time_ms": lead_time,
         })
-        if n_classes == 4:
-            csv_rows[-1]["prob_postimpact"] = float(probabilities[position, 3])
+        if n_classes <= 4:
+            csv_rows[-1].update(prob_dynamic=float(probabilities[position, 1]),
+                                prob_static=float(probabilities[position, 2]), lead_time_ms=lead_time)
+            if n_classes == 4:
+                csv_rows[-1]["prob_postimpact"] = float(probabilities[position, 3])
+        else:
+            csv_rows[-1].update({f"prob_class_{key}": float(probabilities[position, key])
+                                 for key in range(1, n_classes)})
+            if n_classes == 11:
+                csv_rows[-1]["prob_postimpact"] = float(probabilities[position, 10])
+            csv_rows[-1]["lead_time_ms"] = lead_time
 
     report_arguments = dict(labels=list(range(n_classes)), target_names=list(class_names), zero_division=np.nan)
     report = classification_report(truth, predicted, output_dict=True, **report_arguments)

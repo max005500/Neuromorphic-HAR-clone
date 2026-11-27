@@ -7,7 +7,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -154,6 +154,51 @@ class KFallEvaluationDataTests(unittest.TestCase):
         arrays, _, _, resolved = load_evaluation_data(self.run, self.checkpoint_config, cache_dir=moved)
         self.assertEqual(resolved, moved)
         self.assertGreater(len(arrays["y_h1"]), 0)
+
+    def test_extended_scheme_validates_labels_and_checkpoint_provenance(self):
+        names = {str(i): "Fall" if i == 0 else f"Activity {i}" for i in range(10)}
+        metadata = json.loads(self.snapshot_path.read_text())
+        metadata["config"]["label_scheme"] = "extended"
+        metadata["class_names"] = names
+        path = self.cache / "test" / "y_h1.npy"
+        labels = np.load(path)
+        selected = labels != 0
+        labels[selected] = 9
+        np.save(path, labels)
+        metadata["split_summary"]["test"]["class_counts"] = {
+            str(label): int(np.sum(labels == label)) for label in np.unique(labels)}
+        self.snapshot_path.write_text(json.dumps(metadata))
+        (self.cache / "metadata.json").write_text(json.dumps(metadata))
+        config = {**self.checkpoint_config, "label_scheme": "extended", "n_classes": 10}
+        from loaders.kfall_event_loader import window_activity_labels, window_starts_for_record
+
+        def extended_labels(endpoints, record, cfg):
+            values = window_activity_labels(endpoints, record, replace(cfg, label_scheme="legacy"))
+            return np.where(values > 0, 9, values)
+
+        def legacy_starts(recording, record, cfg):
+            return window_starts_for_record(recording, record, replace(cfg, label_scheme="legacy"))
+
+        with patch("evaluation.kfall_data.window_activity_labels", side_effect=extended_labels), patch(
+                "evaluation.kfall_data.window_starts_for_record", side_effect=legacy_starts):
+            arrays, _, _, _ = load_evaluation_data(self.run, config)
+            self.assertIn(9, arrays["y_h1"])
+        with self.assertRaisesRegex(ValueError, "label_scheme"):
+            load_evaluation_data(self.run, self.checkpoint_config)
+        self.rewrite_cache_metadata(lambda value: value["class_names"].update({"9": "Changed"}))
+        with self.assertRaisesRegex(ValueError, "class_names"):
+            load_evaluation_data(self.run, config)
+
+    def test_class_names_fallback_and_historical_legacy_config(self):
+        from evaluation.kfall_classes import resolve_class_names
+
+        old_config = {"n_classes": 3}
+        self.assertEqual(resolve_class_names({}, old_config), ("Fall", "Dynamic", "Static"))
+        names = ["Fall"] + [f"Activity {i}" for i in range(9)]
+        self.assertEqual(resolve_class_names({}, {"label_scheme": "extended", "n_classes": 10,
+                                                   "class_names": names}), tuple(names))
+        with self.assertRaisesRegex(ValueError, "class_names"):
+            resolve_class_names({}, {"label_scheme": "extended", "n_classes": 10})
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -18,6 +19,14 @@ from train_kfall import main
 
 
 class KFallUCIHARTests(unittest.TestCase):
+    def test_extended_checkpoint_rejected_before_loading_uci_data(self):
+        with patch("evaluate_kfall_ucihar._load_checkpoint",
+                   return_value=({}, SimpleNamespace(label_scheme="extended"))), patch(
+                "evaluate_kfall_ucihar.load_ucihar_split") as load:
+            with self.assertRaisesRegex(ValueError, "legacy Dynamic/Static"):
+                evaluate_ucihar("run")
+            load.assert_not_called()
+
     def test_channels_units_and_temporal_context(self):
         signals = np.zeros((1, 128, 6), dtype=np.float32)
         signals[:, :, :3] = np.pi

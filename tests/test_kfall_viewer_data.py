@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import shutil
 import tempfile
 import unittest
@@ -46,6 +47,14 @@ class KFallViewerDataTests(unittest.TestCase):
         self.cache_parent = self.directory / "cache"
         self.cache = self.cache_parent / "kfall_event_loader_default"
         load_or_build_kfall_event_splits(self.root, cache_dir=self.cache_parent, cfg=self.config, verbose=False)
+
+    def test_viewer_rejects_extended_labels_instead_of_misnaming_them(self):
+        path = self.cache / "metadata.json"
+        metadata = json.loads(path.read_text())
+        metadata["config"]["label_scheme"] = "extended"
+        path.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, "only supports legacy"):
+            KFallWindowStore(self.cache)
 
     def test_lazy_read_only_cache_and_source_window_correspondence(self):
         store = KFallWindowStore(self.cache)

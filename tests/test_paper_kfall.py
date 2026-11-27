@@ -18,10 +18,11 @@ from evaluate_paper_continuous import evaluate_continuous
 from evaluate_paper_run import evaluate
 from evaluate_kfall import evaluate_run as evaluate_original
 from loaders.kfall_event_loader import KFallEventLoaderConfig, signal_to_events, window_frame_arrays
+from labeling.kfall_manual_labels import ACTIVITY_NAMES
 from report_paper_results import main as report_results
 from run_paper_experiments import main as prepare
-from test_kfall_training import write_fixture
-from train_kfall import build_data, get_args
+from test_kfall_training import fixture_args, write_fixture
+from train_kfall import build_data, get_args, main as train_main
 
 
 def write_paper_fixture(root):
@@ -56,6 +57,51 @@ def write_paper_fixture(root):
 
 
 class KFallPaperTests(unittest.TestCase):
+    def test_extended_window_and_continuous_evaluation(self):
+        for post_seconds in (0, 1.2):
+            with self.subTest(post_seconds=post_seconds), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_fixture(root)
+                records = {
+                    f"SA{subject}T{task:02d}R01": {
+                        "file": f"S{subject}T{task:02d}R01.csv", "reviewed": True,
+                        "intervals": [[1, 302, 1]], "activity_intervals": [[1, 302, activity]],
+                    }
+                    for subject in ("06", "07", "08") for task, activity in ((1, 0), (4, 8))
+                }
+                annotation = root / "manual.json"
+                annotation.write_text(json.dumps({
+                    "format": "kfall_manual_normal_labels", "version": 1, "dataset": "kfall",
+                    "sample_rate_hz": 100, "activity_label_scheme": "uci_har_extended",
+                    "activity_labels": {str(i): name for i, name in enumerate(ACTIVITY_NAMES)},
+                    "recordings": records,
+                }))
+                args = fixture_args(root)
+                args.remove("--no-manual-labels")
+                args += ["--annotation-file", str(annotation), "--label-scheme", "extended",
+                         "--raw-win", "120", "--post-impact-seconds", str(post_seconds),
+                         "--class-weight", "none"]
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run = train_main(args)
+                    original = evaluate_original(run, device="cpu")
+                    paper = evaluate(run, dataset="kfall", split="test", progress=False)
+                    continuous = evaluate_continuous(run, dataset="kfall", stride=100)
+                count = 11 if post_seconds else 10
+                self.assertEqual(len(original["class_names"]), count)
+                self.assertEqual(original["class_names"][9], "CROUCHING_BENT")
+                self.assertEqual(paper["class_names"], original["class_names"])
+                for folder in (run / "metrics/test_best", run / "metrics/paper_test"):
+                    matrix = np.load(folder / "confusion_matrix.npy")
+                    self.assertEqual(matrix.shape, (count, count))
+                    self.assertEqual(np.load(next((folder / "by_subject").glob("SA*/confusion_matrix.npy"))).shape,
+                                     (count, count))
+                self.assertEqual(continuous["fall_events"], 1)
+                self.assertEqual(continuous["truth_source"], "official_KFall_XLSX_onset_to_impact")
+                with (run / "metrics/paper_continuous/windows.csv").open(newline="") as stream:
+                    windows = list(csv.DictReader(stream))
+                self.assertTrue(windows)
+                self.assertTrue(all(0 <= float(row["fall_probability"]) <= 1 for row in windows))
+
     def test_native_frontends_do_not_interpolate_missing_frames(self):
         signal = np.arange(18, dtype=np.float32).reshape(3, 6)
         frames = np.asarray([10, 11, 14])
@@ -84,6 +130,46 @@ class KFallPaperTests(unittest.TestCase):
                 length = width if trial["variant"] in {"B1", "B2", "B5"} else 10 * width
                 self.assertEqual(command[command.index("--out-win") + 1], str(length))
                 self.assertEqual(trial["head_mode"], "single")
+
+    def test_extended_manifest_passes_label_scheme_to_calibration_and_training(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            manifest = prepare(["--datasets", "kfall", "--kfall-windows", "120",
+                                "--output", str(Path(directory) / "matrix"),
+                                "--pilot", "--seeds", "0", "--kfall-label-scheme", "extended"])
+            self.assertEqual(len(manifest["trials"]), 5)
+            for command in manifest["commands"]:
+                self.assertEqual(command[command.index("--label-scheme") + 1], "extended")
+
+    def test_extended_calibration_tracks_scheme_and_all_tasks(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            annotation = write_paper_fixture(root)
+            doc = json.loads(annotation.read_text())
+            doc["activity_label_scheme"] = "uci_har_extended"
+            doc["activity_labels"] = {str(i): name for i, name in enumerate(ACTIVITY_NAMES)}
+            bounds = [1, 201, 301, 401, 501, 601, 701, 801, 901, 1001]
+            for record in doc["recordings"].values():
+                record["activity_intervals"] = [[bounds[i], bounds[i + 1], i] for i in range(9)]
+            annotation.write_text(json.dumps(doc))
+            common = ["--dataset-root", str(root), "--annotation-file", str(annotation),
+                      "--cache-dir", str(root / "cache"), "--cache-name", "extended",
+                      "--label-scheme", "extended", "--raw-win", "120", "--out-win", "120",
+                      "--stride", "60", "--input-mode", "raw", "--workers", "0", "--quiet-loader"]
+            theta = root / "theta.json"
+            calibrate(["--dataset", "kfall", "--output", str(theta), "--event-out-win", "120",
+                       "--per-class", "1", "--", *common])
+            provenance = json.loads(theta.read_text())
+            self.assertEqual(provenance["window_config"]["label_scheme"], "extended")
+            self.assertEqual(provenance["window_config"]["exclude_tasks"], [])
+            cfg = get_args(common + ["--theta-file", str(theta)])
+            from train.paper_protocol import load_theta_config
+            load_theta_config(cfg, "kfall")
+            data = build_data(cfg, torch.device("cpu"))
+            self.assertEqual(set(data["splits"]["train"]["y_h1"]), set(range(11)))
+            self.assertTrue(any(record["code"] == "T05" for record in data["metadata"]["recordings"]))
+            cfg.label_scheme = "legacy"
+            with self.assertRaisesRegex(ValueError, "window/acquisition policy"):
+                build_data(cfg, torch.device("cpu"))
 
     def test_train_only_calibration_and_raw_tensor_cache_for_each_window(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):

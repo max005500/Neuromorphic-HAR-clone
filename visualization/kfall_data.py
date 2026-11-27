@@ -81,6 +81,8 @@ class KFallWindowStore:
         self.config = dict(self.metadata.get("config", {}))
         allowed = {field.name for field in fields(KFallEventLoaderConfig)}
         self.cfg = KFallEventLoaderConfig(**{key: value for key, value in self.config.items() if key in allowed})
+        if self.cfg.label_scheme != "legacy":
+            raise ValueError("The KFall event viewer only supports legacy activity labels.")
         self.records = self.metadata.get("recordings", [])
         if not isinstance(self.records, list) or not self.records:
             raise ValueError("KFall cache metadata has no source-recording manifest.")

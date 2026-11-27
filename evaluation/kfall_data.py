@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from loaders.kfall_event_loader import KFallEventLoaderConfig, window_activity_labels, window_starts_for_record
+from evaluation.kfall_classes import class_count, resolve_class_names
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -52,7 +53,7 @@ def _data_config(metadata: dict[str, Any]) -> dict[str, Any]:
     config = metadata.get("config")
     if not isinstance(config, dict):
         raise ValueError("KFall evaluation metadata has no preprocessing config.")
-    return {"post_impact_seconds": 0.0, "excluded_tasks": [], "input_mode": "sigma_delta",
+    return {"post_impact_seconds": 0.0, "excluded_tasks": [], "input_mode": "sigma_delta", "label_scheme": "legacy",
             **{key: value for key, value in config.items() if key not in RUNTIME_CONFIG}}
 
 
@@ -145,6 +146,12 @@ def load_evaluation_data(
         raise ValueError("Checkpoint input_mode differs from the training dataset config.")
     if checkpoint_config.get("post_impact_seconds", 0.0) != config["post_impact_seconds"]:
         raise ValueError("Checkpoint post_impact_seconds differs from the training dataset config.")
+    if checkpoint_config.get("label_scheme", "legacy") != config["label_scheme"]:
+        raise ValueError("Checkpoint label_scheme differs from the training dataset config.")
+    n_classes = class_count(checkpoint_config)
+    names = resolve_class_names(run_metadata, checkpoint_config)
+    if "class_names" in cache_metadata and resolve_class_names(cache_metadata, checkpoint_config) != names:
+        raise ValueError("Event cache class_names differ from the training snapshot.")
     if _normalized(checkpoint_config.get("exclude_tasks", [])) != _normalized(config["excluded_tasks"]):
         raise ValueError("Checkpoint exclude_tasks differs from the training dataset config.")
     if run_metadata.get("manual_annotation_signature") != cache_metadata.get("manual_annotation_signature"):
@@ -185,7 +192,6 @@ def load_evaluation_data(
     expected_dtype = np.float32 if cfg.input_mode == "raw" else np.uint8
     if arrays["x_ev"].dtype != expected_dtype:
         raise ValueError(f"Test x_ev must use {np.dtype(expected_dtype).name} for {cfg.input_mode} input.")
-    n_classes = 4 if cfg.post_impact_seconds > 0 else 3
     if not np.isin(arrays["y_h1"], range(n_classes)).all():
         raise ValueError("Test activity labels disagree with the configured KFall classes.")
     for key in ("offset", "y_h2", "w_h2"):

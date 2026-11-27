@@ -15,6 +15,7 @@ import torch
 
 from energy.measure_consumption import SCNEnergyProfiler
 from evaluation.paper_metrics import classification_metrics
+from evaluation.kfall_classes import resolve_class_names
 from train.utils import count_parameters, format_seconds, get_device, save_classification_outputs, save_json
 
 
@@ -46,7 +47,7 @@ def save_confusion_figure(path, truth, prediction, names):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from sklearn.metrics import ConfusionMatrixDisplay
-    figure = Figure(figsize=(8, 7))
+    figure = Figure(figsize=(12, 10) if len(names) > 4 else (8, 7))
     FigureCanvasAgg(figure)
     ConfusionMatrixDisplay.from_predictions(
         truth, prediction, labels=list(range(len(names))), display_labels=names,
@@ -145,10 +146,12 @@ def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None,
         metric_scope = "six_class_official" if dataset == "ucihar" else "four_class_manual_static_plus_all_fall_dynamic"
         truth, prediction = metrics["y_true"], metrics["y_pred"]
         indices = data["datasets"][split].indices if dataset == "sisfall" else np.arange(len(truth))
-    class_names = (module.SINGLE_HEAD_NAMES if dataset == "sisfall" else
-                   module.ACTIVITY_LABELS if dataset == "ucihar" else
-                   {key: module.CLASS_NAMES[key] for key in range(cfg.n_classes)})
-    names = list(class_names.values())
+    if dataset == "kfall":
+        saved_metadata = json.loads((run / "dataset_metadata.json").read_text())
+        names = list(resolve_class_names(saved_metadata, vars(cfg)))
+    else:
+        class_names = module.SINGLE_HEAD_NAMES if dataset == "sisfall" else module.ACTIVITY_LABELS
+        names = list(class_names.values())
     save_classification_outputs(destination, truth, prediction, range(len(names)), names)
     save_confusion_figure(destination / "confusion_matrix.png", truth, prediction, names)
     from matplotlib.figure import Figure
@@ -213,6 +216,9 @@ def evaluate(run, *, dataset, split="val", gpu=0, perturbation=None, tag=None,
         result["label_provenance"] = {
             key: data["metadata"][key] for key in
             ("manual_annotation_signature", "manual_annotation_missing_recordings", "fall_label_rule", "raw_data")}
+        if getattr(cfg, "label_scheme", "legacy") == "extended":
+            result["label_scheme"] = "extended"
+            result["class_names"] = names
     save_json(destination / "result.json", result)
     save_json(destination / "energy_layers.json", layers)
     log(f"stage=done accuracy={accuracy} macro_f1={macro_f1} output={destination}")

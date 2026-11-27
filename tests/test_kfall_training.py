@@ -20,6 +20,7 @@ from train.utils import make_grad_scaler
 from evaluate_kfall import evaluate_run
 from run_kfall_architectures import main as compare_architectures
 from visualization.kfall_data import KFallWindowStore
+from labeling.kfall_manual_labels import ACTIVITY_NAMES
 
 
 def write_fixture(root: Path) -> None:
@@ -55,6 +56,41 @@ def fixture_args(root: Path) -> list[str]:
 
 
 class KFallTrainingTests(unittest.TestCase):
+    def test_extended_classes_train_without_task_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_fixture(root)
+            annotation = root / "manual.json"
+            records = {}
+            for subject in ("06", "07", "08"):
+                for task, activity in ((1, 0), (4, 8)):
+                    records[f"SA{subject}T{task:02d}R01"] = {
+                        "file": f"S{subject}T{task:02d}R01.csv", "reviewed": True,
+                        "intervals": [[1, 302, 1 if activity == 0 else 2]],
+                        "activity_intervals": [[1, 302, activity]],
+                    }
+            annotation.write_text(json.dumps({
+                "format": "kfall_manual_normal_labels", "version": 1, "dataset": "kfall",
+                "sample_rate_hz": 100, "activity_label_scheme": "uci_har_extended",
+                "activity_labels": {str(i): name for i, name in enumerate(ACTIVITY_NAMES)},
+                "recordings": records,
+            }))
+            args = fixture_args(root)
+            args.remove("--no-manual-labels")
+            args += ["--annotation-file", str(annotation), "--label-scheme", "extended",
+                     "--raw-win", "120", "--post-impact-seconds", "1.2", "--class-weight", "none",
+                     "--cache-format", "pt"]
+            cfg = get_args(args)
+            self.assertEqual(cfg.exclude_tasks, [])
+            with contextlib.redirect_stdout(io.StringIO()):
+                run = main(args)
+            metadata = json.loads((run / "dataset_metadata.json").read_text())
+            self.assertEqual(metadata["class_names"]["9"], "CROUCHING_BENT")
+            self.assertEqual(metadata["class_names"]["10"], "PostImpact")
+            self.assertEqual(set(np.load(run / "metrics" / "y_true.npy")), {0, 1, 9, 10})
+            checkpoint = torch.load(run / "checkpoints" / "best_model.pt", map_location="cpu", weights_only=False)
+            self.assertEqual(checkpoint["config"]["n_classes"], 11)
+
     def test_architecture_comparison_reloads_compact_gru_for_held_out_test(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

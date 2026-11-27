@@ -22,7 +22,7 @@ from loaders.kfall_event_loader import (
     window_activity_labels,
 )
 from preprocess.preprocess_kfall import CHANNELS
-from labeling.kfall_manual_labels import load_manual_labels
+from labeling.kfall_manual_labels import ACTIVITY_NAMES, load_manual_labels
 
 
 class KFallEventTests(unittest.TestCase):
@@ -193,6 +193,36 @@ class KFallEventTests(unittest.TestCase):
                         {"excluded_tasks": ("T00",)}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(self.cfg, **changes)
+
+    def test_extended_activities_keep_distinct_ids_and_official_fall_precedence(self):
+        cfg = replace(self.cfg, label_scheme="extended", post_impact_seconds=1.2)
+        info = {**self.info, "activity_intervals": [[101, 109, 0], [109, 117, 8]]}
+        np.testing.assert_array_equal(
+            window_activity_labels(np.array([101, 108, 109, 114, 115, 120]), info, cfg),
+            [1, 1, 0, 0, 10, 10],
+        )
+        no_intervals = {"label_id": 1}
+        np.testing.assert_array_equal(window_activity_labels(np.array([101, 102]), no_intervals, cfg), [-1, -1])
+
+    def test_extended_annotation_validation_rejects_bad_activity_ids_and_overlaps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "labels.json"
+            data = {
+                "format": "kfall_manual_normal_labels", "version": 1, "dataset": "kfall",
+                "sample_rate_hz": 100, "activity_label_scheme": "uci_har_extended",
+                "activity_labels": {str(i): name for i, name in enumerate(ACTIVITY_NAMES)},
+                "recordings": {"SA06T01R01": {
+                    "reviewed": True, "intervals": [[1, 21, 1]],
+                    "activity_intervals": [[1, 11, 0], [11, 21, 8]],
+                }},
+            }
+            path.write_text(json.dumps(data))
+            load_manual_labels(path, extended=True)
+            for intervals in ([[1, 11, 9]], [[1, 11, 0], [10, 21, 1]]):
+                data["recordings"]["SA06T01R01"]["activity_intervals"] = intervals
+                path.write_text(json.dumps(data))
+                with self.assertRaisesRegex(ValueError, "activity intervals"):
+                    load_manual_labels(path, extended=True)
 
     def test_manual_labels_and_exact_postimpact_endpoint_interval(self):
         record = np.zeros((700, 6), dtype=np.float32)

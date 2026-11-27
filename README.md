@@ -560,6 +560,11 @@ Results are saved under the run's `metrics/test_best/`:
   matrix per held-out subject, with counts and normalization by true class.
   These reuse the full-test predictions without additional inference.
 
+Extended-label runs use the saved class names and have 10 classes, or 11 when
+post-impact is enabled. Their prediction CSV uses `prob_fall` and
+`prob_class_1` through `prob_class_9` (plus `prob_class_10` and
+`prob_postimpact` for post-impact). Legacy CSV columns remain unchanged.
+
 Restrict inspection to a held-out subject or a specific test-window index:
 
 ```bash

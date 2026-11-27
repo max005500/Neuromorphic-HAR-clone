@@ -190,6 +190,52 @@ class KFallEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "(?i)(class.weight|training.*weight|weight.*training)"):
             self.evaluate(checkpoint=checkpoint)
 
+    def test_checkpoint_without_label_scheme_remains_legacy(self):
+        fixture = self.fixtures["single"]
+        payload = torch.load(fixture["run"] / "checkpoints" / "best_model.pt", map_location="cpu", weights_only=True)
+        payload["config"].pop("label_scheme", None)
+        checkpoint = self.directory / "historical.pt"
+        torch.save(payload, checkpoint)
+        _, destination, metrics = self.evaluate(checkpoint=checkpoint)
+        self.assertEqual(metrics["class_names"], ["Fall", "Dynamic", "Static"])
+        np.testing.assert_array_equal(np.load(destination / "y_pred.npy"), fixture["prediction"])
+
+    def test_extended_checkpoint_and_selected_window_use_saved_names(self):
+        from evaluate_kfall import _load_checkpoint, evaluate_run
+        from train_kfall import build_model
+        from types import SimpleNamespace
+
+        fixture = self.fixtures["single"]
+        payload = torch.load(fixture["run"] / "checkpoints" / "best_model.pt", map_location="cpu", weights_only=True)
+        config = payload["config"]
+        config.update(label_scheme="extended", post_impact_seconds=1.0, n_classes=11, class_weight="none")
+        payload["model_state_dict"] = build_model(SimpleNamespace(**config), torch.device("cpu")).state_dict()
+        checkpoint = self.directory / "extended.pt"
+        torch.save(payload, checkpoint)
+        _, cfg = _load_checkpoint(checkpoint)
+        self.assertEqual(cfg.n_classes, 11)
+        names = {str(i): "Fall" if i == 0 else f"Custom {i}" for i in range(11)}
+        from evaluation.kfall_data import load_evaluation_data
+        split, metadata, run_metadata, cache = load_evaluation_data(fixture["run"], {
+            **config, "label_scheme": "legacy", "post_impact_seconds": 0.0, "n_classes": 3})
+        split = dict(split)
+        split["y_h1"] = np.full(len(split["y_h1"]), 10, dtype=np.int64)
+        run_metadata = {**run_metadata, "class_names": names}
+        destination = self.output_dir("extended")
+        with patch("evaluate_kfall.load_evaluation_data", return_value=(split, metadata, run_metadata, cache)):
+            metrics = evaluate_run(fixture["run"], checkpoint=checkpoint, output_dir=destination, device="cpu", window=0)
+        self.assertEqual(metrics["selected_window"]["true"], "Custom 10")
+        self.assertEqual(list(metrics["selected_window"]["probabilities"]), list(names.values()))
+        self.assertEqual(np.load(destination / "confusion_matrix.npy").shape, (11, 11))
+        config["post_impact_seconds"] = 0.0
+        config["n_classes"] = 10
+        torch.save(payload, checkpoint)
+        self.assertEqual(_load_checkpoint(checkpoint)[1].n_classes, 10)
+        config["n_classes"] = 11
+        torch.save(payload, checkpoint)
+        with self.assertRaisesRegex(ValueError, "class count"):
+            _load_checkpoint(checkpoint)
+
 
 if __name__ == "__main__":
     unittest.main()

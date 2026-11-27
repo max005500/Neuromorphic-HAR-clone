@@ -133,6 +133,29 @@ class KFallEvaluationReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty"):
             self.report(indices=(), probabilities=np.empty((0, 3)))
 
+    def test_extended_classes_preserve_all_probabilities_and_subject_matrices(self):
+        names = ["Fall"] + [f"Activity {i}" for i in range(9)] + ["PostImpact"]
+        self.split["y_h1"][:3] = [0, 9, 10]
+        probabilities = np.eye(11)[[10, 9, 0]]
+        metrics = self.report(indices=(0, 1, 2), probabilities=probabilities,
+                              summary={"class_names": names}, subject_matrices=True)
+        counts = np.load(self.destination / "confusion_matrix.npy")
+        self.assertEqual(counts.shape, (11, 11))
+        self.assertEqual(counts[0, 10], 1)
+        self.assertEqual(counts[10, 0], 1)
+        self.assertEqual(metrics["class_counts"]["Activity 8"], 1)
+        self.assertEqual(metrics["fall_window_metrics"]["false_fall_windows"], 1)
+        np.testing.assert_array_equal(
+            sum(np.load(self.destination / "by_subject" / subject / "confusion_matrix.npy")
+                for subject in ("SA07", "SA21")), counts)
+        with (self.destination / "predictions.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(rows[0]["predicted_class"], "PostImpact")
+        self.assertEqual(float(rows[0]["prob_class_10"]), 1.0)
+        self.assertEqual(float(rows[0]["prob_postimpact"]), 1.0)
+        self.assertEqual(float(rows[0]["prob_class_3"]), 0.0)
+        self.assertNotIn("prob_dynamic", rows[0])
+
 
 if __name__ == "__main__":
     unittest.main()

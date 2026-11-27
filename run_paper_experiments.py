@@ -96,6 +96,8 @@ def build_manifest(args):
                 shared.update(dataset_root=str(args.kfall_root.resolve()), stride=native // 2,
                               split=args.kfall_split, post_impact_seconds=1.2, fall_policy="pre_impact",
                               head_mode="single")
+                if args.kfall_label_scheme == "extended":
+                    shared["label_scheme"] = "extended"
                 if args.kfall_label_dir is not None:
                     shared["label_dir"] = str(args.kfall_label_dir.resolve())
                 if args.kfall_annotation_file is not None:
@@ -156,6 +158,8 @@ def main(argv=None):
     parser.add_argument("--kfall-root", type=Path, default=Path("data/KFall"))
     parser.add_argument("--kfall-label-dir", type=Path, help="Override the official KFall XLSX directory.")
     parser.add_argument("--kfall-annotation-file", type=Path, help="Manual labels; otherwise use the trainer's JSON/.bak discovery.")
+    parser.add_argument("--kfall-label-scheme", choices=("legacy", "extended"), default="legacy",
+                        help="Use detailed KFall activity labels instead of the legacy grouping.")
     parser.add_argument("--kfall-windows", type=int, nargs="+", choices=(120, 206, 320), default=[120, 206, 320],
                         help="Native sample lengths at 100 Hz.")
     parser.add_argument("--kfall-split", type=float, nargs=3, default=[0.6, 0.3, 0.1])
@@ -242,6 +246,8 @@ def main(argv=None):
                             kfall_split=args.kfall_split if trial["dataset"] == "kfall" else None,
                             label_provenance=result.get("label_provenance"),
                             energy_model=result["energy_model"])
+            if trial["dataset"] == "kfall" and args.kfall_label_scheme == "extended":
+                protocol["label_scheme"] = "extended"
             protocol_id = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode()).hexdigest()[:16]
             profile_id = hashlib.sha256(
                 json.dumps(manifest["profiles"][trial["profile"]], sort_keys=True).encode()).hexdigest()[:12]

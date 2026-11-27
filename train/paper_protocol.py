@@ -40,7 +40,10 @@ def calibration_window_config(cfg):
     keys = ("raw_win", "n_ch", "acc", "dtype", "stride_fall", "stride_dynamic", "stride_static",
             "fall_policy", "sample_rate_hz", "window_stride", "interp_method", "case", "val_ratio",
             "stride", "exclude_tasks", "post_impact_seconds")
-    return {key: getattr(cfg, key) for key in keys if hasattr(cfg, key)}
+    result = {key: getattr(cfg, key) for key in keys if hasattr(cfg, key)}
+    if getattr(cfg, "label_scheme", "legacy") != "legacy":
+        result["label_scheme"] = cfg.label_scheme
+    return result
 
 
 def calibration_source_fingerprint(metadata):

@@ -19,7 +19,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from loaders import utils as u
-from labeling.kfall_manual_labels import load_manual_labels
+from labeling.kfall_manual_labels import ACTIVITY_NAMES, load_manual_labels
 from preprocess.event_encoding import sigma_delta
 from preprocess.interpolate_signal import interpolate_to_times
 from preprocess.preprocess_kfall import FILE_RE, load_kfall_3class
@@ -32,6 +32,7 @@ ARRAY_KEYS = (
 )
 DEFAULT_THETA_KFALL = (0.1, 0.1, 0.1, 10.0, 10.0, 10.0)
 CLASS_NAMES = {0: "Fall", 1: "Dynamic", 2: "Static", 3: "PostImpact"}
+EXTENDED_CLASS_NAMES = {0: "Fall", **{i + 1: name for i, name in enumerate(ACTIVITY_NAMES)}, 10: "PostImpact"}
 DEFAULT_EXCLUDED_TASKS = ("T05", "T13", "T14", "T16", "T18", "T19")
 TASK_CODES = tuple(f"T{task:02d}" for task in range(1, 37))
 
@@ -56,10 +57,13 @@ class KFallEventLoaderConfig:
     pin_memory: bool = True
     excluded_tasks: tuple[str, ...] = ()
     input_mode: str = "sigma_delta"
+    label_scheme: str = "legacy"
 
     def __post_init__(self) -> None:
         if self.input_mode not in {"raw", "sigma_delta"}:
             raise ValueError("input_mode must be raw or sigma_delta.")
+        if self.label_scheme not in {"legacy", "extended"}:
+            raise ValueError("label_scheme must be legacy or extended.")
         if any(task not in TASK_CODES for task in self.excluded_tasks):
             raise ValueError("excluded_tasks must contain KFall task codes T01..T36.")
         if self.raw_win < 2 or self.out_win < 2 or self.stride < 1:
@@ -88,11 +92,11 @@ def window_activity_labels(
     """Label endpoints; official fall/post-impact intervals override manual labels."""
     end_frames = np.asarray(end_frames)
     labels = np.full(end_frames.shape, -1, dtype=np.int64)
-    intervals = meta.get("manual_intervals")
+    intervals = meta.get("activity_intervals") if cfg.label_scheme == "extended" else meta.get("manual_intervals")
     if intervals is not None:
         for start, stop, label in intervals:
-            labels[(end_frames >= start) & (end_frames < stop)] = label
-    elif int(meta["label_id"]) != 0:
+            labels[(end_frames >= start) & (end_frames < stop)] = label + (cfg.label_scheme == "extended")
+    elif cfg.label_scheme == "legacy" and int(meta["label_id"]) != 0:
         labels[:] = int(meta["label_id"])
     if int(meta["label_id"]) == 0:
         onset, impact = int(meta["fall_onset_frame"]), int(meta["fall_impact_frame"])
@@ -102,7 +106,7 @@ def window_activity_labels(
             post = (end_frames >= impact) & (end_frames < impact + round(cfg.post_impact_seconds * 100))
             if cfg.fall_policy == "annotated_interval":
                 post &= end_frames > impact
-            labels[post] = 3
+            labels[post] = 10 if cfg.label_scheme == "extended" else 3
     return labels
 
 
@@ -114,7 +118,7 @@ def window_starts_for_record(
     if length < cfg.raw_win:
         return np.empty(0, dtype=np.int64)
     starts = np.arange(0, length - cfg.raw_win + 1, cfg.stride, dtype=np.int64)
-    if cfg.post_impact_seconds or "manual_intervals" in meta:
+    if cfg.post_impact_seconds or "manual_intervals" in meta or cfg.label_scheme == "extended":
         frames = np.asarray(meta.get("frames", meta.get("frame_grid", np.arange(1, length + 1))), dtype=np.int64)
         if int(meta["label_id"]) == 0:
             impact = int(meta["fall_impact_frame"])
@@ -211,7 +215,8 @@ def build_event_split(
             arrays["x_ev"][cursor] = events
             arrays["offset"][cursor] = offset
             activity = (int(window_activity_labels(np.array([end_frame]), info, cfg)[0])
-                        if cfg.post_impact_seconds or "manual_intervals" in info else int(labels[fi]))
+                        if cfg.post_impact_seconds or "manual_intervals" in info or cfg.label_scheme == "extended"
+                        else int(labels[fi]))
             arrays["y_h1"][cursor] = activity
             # KFall supplies fall timing, not temporal posture-transition labels.
             arrays["y_h2"][cursor] = 0.5
@@ -275,8 +280,10 @@ def load_or_build_kfall_event_splits(
         "config": asdict(cfg), "source_signature": _source_signature(root, labels_root),
     }
     manual_records = None
+    if cfg.label_scheme == "extended" and annotation_file is None:
+        raise ValueError("Extended KFall labels require an annotation JSON.")
     if annotation_file is not None:
-        manual_records, signature = load_manual_labels(annotation_file)
+        manual_records, signature = load_manual_labels(annotation_file, extended=cfg.label_scheme == "extended")
         expected["manual_annotation_signature"] = signature
     else:
         expected["manual_annotation_signature"] = None
@@ -300,10 +307,14 @@ def load_or_build_kfall_event_splits(
             if entry.get("file") != Path(record["file"]).name:
                 raise ValueError(f"Manual annotation filename mismatch for {key}.")
             frames = record["frames"]
-            for start, stop, _ in entry["intervals"]:
+            for start, stop, _ in entry["intervals"] + (
+                entry.get("activity_intervals", []) if cfg.label_scheme == "extended" else []
+            ):
                 if start < int(frames[0]) or stop > int(frames[-1]) + 1:
                     raise ValueError(f"Manual annotation frames outside recording {key}.")
             record["manual_intervals"] = entry["intervals"]
+            if cfg.label_scheme == "extended":
+                record["activity_intervals"] = entry.get("activity_intervals", [])
             matched.add(key)
         if set(manual_records) - matched:
             raise ValueError("Manual annotation file contains recordings absent from this dataset.")
@@ -322,7 +333,14 @@ def load_or_build_kfall_event_splits(
     if cfg.excluded_tasks:
         print(f"[tasks] excluded={list(cfg.excluded_tasks)} | removed={len(excluded)} recordings | retained={len(records)}")
     if missing:
-        print(f"[labels:warning] No manual labels for {len(missing)} recordings; using task/official fall labels: {missing}")
+        policy = ("only official fall/post-impact intervals are used"
+                  if cfg.label_scheme == "extended" else "using task/official fall labels")
+        print(f"[labels:warning] No manual labels for {len(missing)} recordings; {policy}: {missing}")
+    if cfg.label_scheme == "extended":
+        empty_activities = [record for record in records if not record.get("activity_intervals")]
+        if empty_activities:
+            print(f"[labels:warning] {len(empty_activities)} recordings have no detailed activity intervals; "
+                  "unlabeled normal windows are omitted.")
     for record in records:
         frames = record["frames"]
         if int(frames[0]) != 1 or np.any(np.diff(frames) != 1):
@@ -347,7 +365,9 @@ def load_or_build_kfall_event_splits(
         "units": ["g", "g", "g", "degrees/s", "degrees/s", "degrees/s"],
         "head2_labels_available": False,
         "manual_annotation_missing_recordings": missing,
-        "class_names": CLASS_NAMES if cfg.post_impact_seconds else {key: value for key, value in CLASS_NAMES.items() if key < 3},
+        "class_names": {key: value for key, value in
+                        (EXTENDED_CLASS_NAMES if cfg.label_scheme == "extended" else CLASS_NAMES).items()
+                        if cfg.post_impact_seconds or value != "PostImpact"},
         "fall_label_rule": "onset <= final frame < impact" if cfg.fall_policy == "pre_impact"
                            else "onset <= final frame <= impact",
         "split_summary": {},

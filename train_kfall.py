@@ -29,7 +29,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from loaders.kfall_event_loader import (
-    CLASS_NAMES, DEFAULT_EXCLUDED_TASKS, TASK_CODES,
+    CLASS_NAMES, EXTENDED_CLASS_NAMES, DEFAULT_EXCLUDED_TASKS, TASK_CODES,
     KFallEventLoaderConfig, load_or_build_kfall_event_splits,
 )
 from loaders.utils import balanced_class_weights
@@ -44,7 +44,7 @@ from train.paper_protocol import load_theta_config, verify_calibration_subjects,
 class KFallTrainingDataset(Dataset):
     """Read native/event windows on demand, retaining memory-mapped arrays."""
 
-    def __init__(self, split: dict[str, np.ndarray]) -> None:
+    def __init__(self, split: dict[str, np.ndarray], n_classes: int = 4) -> None:
         self.split = split
         n = len(split["y_h1"])
         if split["x_ev"].shape[0] != n or split["offset"].shape != (n, 6):
@@ -52,8 +52,8 @@ class KFallTrainingDataset(Dataset):
         x = split["x_ev"]
         if not ((x.ndim == 4 and x.shape[2:] == (6, 2)) or (x.ndim == 3 and x.shape[2] == 6)):
             raise ValueError("KFall requires events (N, Te, 6, 2) or raw (N, T, 6).")
-        if not np.isin(split["y_h1"], list(CLASS_NAMES)).all():
-            raise ValueError("KFall activity labels must be Fall=0, Dynamic=1, Static=2 or PostImpact=3.")
+        if not np.isin(split["y_h1"], range(n_classes)).all():
+            raise ValueError("KFall activity labels do not match the selected class scheme.")
 
     def __len__(self) -> int:
         return len(self.split["y_h1"])
@@ -83,9 +83,11 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--annotation-file", default=None if annotation_default is None else str(annotation_default),
                    help="Manual normal-activity labels; defaults to annotations JSON (or its .bak).")
     p.add_argument("--no-manual-labels", action="store_true", help="Use the original task grouping instead of manual normal intervals.")
+    p.add_argument("--label-scheme", choices=("legacy", "extended"), default="legacy",
+                   help="extended learns each detailed manual activity separately.")
     p.add_argument("--exclude-tasks", nargs="*", type=str.upper, choices=TASK_CODES,
-                   default=list(DEFAULT_EXCLUDED_TASKS),
-                   help="Exclude every repetition/subject of these tasks; pass no values to retain all tasks.")
+                   default=None,
+                   help="Exclude tasks; defaults to legacy exclusions, or none for extended labels.")
     p.add_argument("--cache-dir", default="data/kfall_cache")
     p.add_argument("--cache-name", default="default")
     p.add_argument("--refresh-cache", action="store_true")
@@ -161,9 +163,14 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("srnn-hidden must be nonnegative and requires LIF activation without a GRU.")
     cfg.n_ch = 6
     cfg.dataset = "kfall"
-    cfg.n_classes = 4 if cfg.post_impact_seconds > 0 else 3
+    cfg.n_classes = (11 if cfg.post_impact_seconds > 0 else 10) if cfg.label_scheme == "extended" else (
+        4 if cfg.post_impact_seconds > 0 else 3)
+    if cfg.exclude_tasks is None:
+        cfg.exclude_tasks = [] if cfg.label_scheme == "extended" else list(DEFAULT_EXCLUDED_TASKS)
     if cfg.no_manual_labels:
         cfg.annotation_file = None
+    if cfg.label_scheme == "extended" and cfg.annotation_file is None:
+        p.error("--label-scheme extended requires manual annotations.")
     cfg.lambda_h1 = 1.0
     cfg.lambda_h2 = 0.0
     cfg.use_ambiguous = False
@@ -186,6 +193,7 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
         post_impact_seconds=cfg.post_impact_seconds,
         excluded_tasks=tuple(cfg.exclude_tasks),
         input_mode=getattr(cfg, "input_mode", "sigma_delta"),
+        label_scheme=getattr(cfg, "label_scheme", "legacy"),
     )
     splits, metadata = load_or_build_kfall_event_splits(
         dataset_root=cfg.dataset_root,
@@ -204,10 +212,10 @@ def build_data(cfg: argparse.Namespace, dev: torch.device) -> dict[str, Any]:
     verify_publication_data(cfg, splits, metadata, "kfall")
     if cfg.cache_format == "pt":
         cache_root = Path(cfg.cache_dir) / f"kfall_event_loader_{cfg.cache_name}"
-        datasets = {name: load_or_build_tensor_dataset(cache_root, name, split)
+        datasets = {name: load_or_build_tensor_dataset(cache_root, name, split, n_classes=cfg.n_classes)
                     for name, split in splits.items()}
     else:
-        datasets = {name: KFallTrainingDataset(split) for name, split in splits.items()}
+        datasets = {name: KFallTrainingDataset(split, n_classes=cfg.n_classes) for name, split in splits.items()}
     loaders = {
         name: DataLoader(
             dataset,
@@ -253,10 +261,11 @@ def main(argv: list[str] | None = None) -> Path | None:
     dev = get_device(cfg.gpu)
     print(f"[labels] manual={cfg.annotation_file or 'disabled (task grouping)'} | post_impact_seconds={cfg.post_impact_seconds}")
     data = build_data(cfg, dev)
-    class_names = {key: CLASS_NAMES[key] for key in range(cfg.n_classes)}
+    all_names = EXTENDED_CLASS_NAMES if cfg.label_scheme == "extended" else CLASS_NAMES
+    class_names = {key: all_names[key] for key in range(cfg.n_classes)}
     for name, split in data["splits"].items():
         subjects = data["metadata"].get("split_subjects", {}).get(name, [])
-        print(f"[data:{name}] subjects={subjects} | N={len(split['y_h1'])} | counts={named_class_counts(split['y_h1'], CLASS_NAMES)}")
+        print(f"[data:{name}] subjects={subjects} | N={len(split['y_h1'])} | counts={named_class_counts(split['y_h1'], class_names)}")
     if cfg.preprocess_only:
         cache_path = Path(cfg.cache_dir) / f"kfall_event_loader_{cfg.cache_name}"
         print(f"[done] cache={cache_path} | metadata={cache_path / 'metadata.json'}")
@@ -341,7 +350,7 @@ def main(argv: list[str] | None = None) -> Path | None:
         best_val_loss=float(fit_result["best_val"]),
         best_epoch=int(checkpoint.get("epoch", -1)),
         total_time_sec=float(time.time() - fit_result["started_at"]),
-        class_counts_test=named_class_counts(y_true, CLASS_NAMES),
+        class_counts_test=named_class_counts(y_true, class_names),
         head2_supervised=False,
         use_offset=cfg.use_offset,
     )

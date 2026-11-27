@@ -85,6 +85,8 @@ def evaluate_ucihar(
         raise ValueError("batch_size must be positive and workers nonnegative.")
     run_dir = Path(run_dir).expanduser().resolve()
     saved, model_cfg = _load_checkpoint(run_dir / "checkpoints" / "best_model.pt")
+    if getattr(model_cfg, "label_scheme", "legacy") == "extended":
+        raise ValueError("UCI-HAR evaluation only supports the legacy Dynamic/Static label mapping.")
     allowed = {field.name for field in fields(KFallEventLoaderConfig)}
     encoder_args = {key: value for key, value in saved["config"].items() if key in allowed}
     encoder_args["theta_sd"] = tuple(model_cfg.theta)

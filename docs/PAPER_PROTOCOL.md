@@ -121,6 +121,14 @@ KFall conserva:
   Los intervalos oficiales Fall/PostImpact prevalecen sobre etiquetas normales.
   Las grabaciones sin manual conservan el fallback advertido y registrado.
 
+Estas reglas son el modo legacy por defecto. Con `--kfall-label-scheme extended`
+se entrenan Fall, las nueve actividades individuales de `activity_intervals`
+y PostImpact (11 clases); en este modo no se excluyen tareas por defecto y
+se omiten las ventanas normales sin etiqueta detallada. La clase Fall y
+PostImpact siguen teniendo prioridad. Para excluir tareas explicitamente usa
+`--kfall-exclude-tasks T05 ...`. La calibracion y todas las variantes usan el
+mismo esquema, y no deben mezclarse sus resultados con los del modo legacy.
+
 Se exige un JSON manual en modo publicable. Cada variante/semilla/ventana usa
 las mismas anotaciones y exclusiones; estas se guardan en la procedencia y
 se verifican al reutilizar theta. Las posiciones FrameCounter se conservan,
